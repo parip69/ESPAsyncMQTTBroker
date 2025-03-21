@@ -1,10 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
-#include <ESPAsyncMQTTBroker.h>
+#include "ESPAsyncMQTTBroker.h"  // Relativer Pfad mit Anführungszeichen, nicht mit <>
 
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASSWORD "YOUR_PASSWORD" 
+#define WIFI_SSID "YOUR_SSID"           // Dein WLAN-Name
+#define WIFI_PASSWORD "YOUR_PASSWORD"   // Dein WLAN-Passwort
 #define MQTT_PORT 1883
 
 ESPAsyncMQTTBroker mqttBroker(MQTT_PORT);
