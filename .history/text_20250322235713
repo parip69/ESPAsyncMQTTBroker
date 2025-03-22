@@ -12,7 +12,8 @@ git push
 git init
 
 # Remote-Repository konfigurieren
-git remote add origin https://github.com/parip69/ESPAsyncMQTTBroker.git
+git remote add origin https://github.com/Kala69/ESPAsyncMQTTBroker.git
+
 # Fügen Sie alle Verzeichnisse und wichtige Dateien explizit hinzu
 git add examples/
 git add src/
