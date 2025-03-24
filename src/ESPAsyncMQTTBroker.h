@@ -109,6 +109,7 @@ private:
     MessageCallback messageCallback = nullptr;
     ClientDisconnectCallback clientDisconnectCallback = nullptr;
     ErrorCallback errorCallback = nullptr;
+
     SubscribeCallback subscribeCallback = nullptr;
     UnsubscribeCallback unsubscribeCallback = nullptr;
     
