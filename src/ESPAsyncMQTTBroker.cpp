@@ -750,3 +750,4 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String& username, const String
     }
     return true;
 }
+
