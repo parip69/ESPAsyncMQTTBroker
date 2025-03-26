@@ -93,6 +93,9 @@ public:
     void onSubscribe(SubscribeCallback callback) { subscribeCallback = callback; }
     void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
     
+    // Behalte nur die Client-Info-Methode, entferne die Message-History-Methoden
+    std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
+    
 private:
     AsyncServer* server;
     uint16_t port;
@@ -100,6 +103,9 @@ private:
     std::vector<RetainedMessage*> retainedMessages;
     std::map<String, MQTTClient*> persistentSessions;
     ESPAsyncMQTTBrokerConfig brokerConfig;
+    
+    // Behalte die Client-Info-Map, entferne die Message-History
+    std::map<String, String> connectedClientsInfo; // Client-ID -> IP
     
     // Asynchroner Timer für Keep-Alive-Timeouts
     esp_timer_handle_t timeoutTimer = NULL;
@@ -109,7 +115,6 @@ private:
     MessageCallback messageCallback = nullptr;
     ClientDisconnectCallback clientDisconnectCallback = nullptr;
     ErrorCallback errorCallback = nullptr;
-
     SubscribeCallback subscribeCallback = nullptr;
     UnsubscribeCallback unsubscribeCallback = nullptr;
     
