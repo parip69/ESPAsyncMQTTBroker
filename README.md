@@ -8,7 +8,6 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `ESPAsyncWebServer`.
 
 - MQTT-Broker läuft direkt auf dem ESP32
 - Volle Kontrolle über Topics, Clients und Nachrichten
-- Unterstützt `/ring`-Topic zum Steuern von Geräten wie LEDs oder Relais
 - Optionales Webinterface zur Anzeige verbundener Clients und empfangener Nachrichten
 - Keine Internetverbindung erforderlich – funktioniert komplett lokal
 - Kompatibel mit PlatformIO und dem Arduino-Framework
