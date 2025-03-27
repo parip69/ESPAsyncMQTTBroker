@@ -1,0 +1,13 @@
+{
+  "name": "ESPAsyncMQTTBroker",
+  "version": "1.0.0",
+  "description": "Ein asynchroner MQTT-Broker für ESP32 auf Basis von AsyncWebServer",
+  "keywords": ["mqtt", "broker", "esp32", "async"],
+  "repository":
+  {
+    "type": "git",
+    "url": "https://github.com/parip69/ESPAsyncMQTTBroker.git"
+  },
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

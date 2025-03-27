@@ -1,65 +1,70 @@
+![Logo](logo.svg)
+
 # ESPAsyncMQTTBroker
 
-Ein asynchroner MQTT-Broker für ESP8266/ESP32 Mikrocontroller.
+Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `ESPAsyncWebServer`.
 
-## Beschreibung
+## Features
 
-Diese Bibliothek implementiert einen leichtgewichtigen MQTT-Broker, der direkt auf ESP8266/ESP32-Geräten läuft. Der Broker nutzt asynchrone Kommunikation für bessere Performance.
-
-## Funktionen
-
-- Vollständiger MQTT 3.1.1 Broker auf dem ESP32
-- Unterstützung für QoS 0, 1 und 2
-- Retained Messages
-- Persistente Sessions
-- Authentifizierung mit Benutzername/Passwort
-- Topic-Wildcards (+ und #)
+- MQTT-Broker läuft direkt auf dem ESP32
+- Volle Kontrolle über Topics, Clients und Nachrichten
+- Unterstützt `/ring`-Topic zum Steuern von Geräten wie LEDs oder Relais
+- Optionales Webinterface zur Anzeige verbundener Clients und empfangener Nachrichten
+- Keine Internetverbindung erforderlich – funktioniert komplett lokal
+- Kompatibel mit PlatformIO und dem Arduino-Framework
 
 ## Installation
 
-1. Laden Sie das Repository herunter:
-   ```
-   git clone https://github.com/IHR_USERNAME/ESPAsyncMQTTBroker.git
-   ```
-2. Kopieren Sie den Ordner in Ihr Arduino/libraries Verzeichnis
-3. Starten Sie die Arduino IDE neu
-
-## Installation (PlatformIO)
-```bash
-pio lib install me-no-dev/AsyncTCP
-pio lib install https://github.com/Kala69/ESPAsyncMQTTBroker.git
+**PlatformIO**
+```ini
+lib_deps = 
+    https://github.com/parip69/ESPAsyncMQTTBroker.git
 ```
 
-## Verwendung
+**Arduino IDE**
+1. Repository als ZIP herunterladen
+2. In der Arduino IDE über "Sketch" → "Bibliothek einbinden" → "ZIP-Bibliothek hinzufügen"
+
+## Beispiel
 
 ```cpp
 #include <ESPAsyncMQTTBroker.h>
 
-ESPAsyncMQTTBroker mqttBroker;
+ESPAsyncMQTTBroker mqtt;
 
 void setup() {
-  mqttBroker.begin();
+  Serial.begin(115200);
+  WiFi.begin("SSID", "PASSWORT");
+
+  mqtt.onMessage([](const String& topic, const String& payload) {
+    Serial.printf("Topic: %s, Payload: %s\n", topic.c_str(), payload.c_str());
+    if (topic == "/ring") {
+      digitalWrite(LED_BUILTIN, payload == "an" ? LOW : HIGH);
+    }
+  });
+
+  mqtt.begin();
 }
 
 void loop() {
-  // Der Broker arbeitet asynchron, hier ist keine zusätzliche Arbeit nötig
+  mqtt.loop();
 }
 ```
 
-## Mitwirken
+## Beispiele
 
-Beiträge sind willkommen! Bitte lesen Sie [CONTRIBUTING.md](CONTRIBUTING.md) für Details zum Entwicklungsprozess.
+- [`examples/BasicBroker`](examples/BasicBroker)
+- [`examples/WithWebServer`](examples/WithWebServer)
+- [`examples/ControlLED`](examples/ControlLED)
+
+## GitHub Actions
+
+Dieses Repository nutzt GitHub Actions, um automatisch die `examples/BasicBroker`-Version bei jedem Push zu bauen.
+
+## Autor
+
+**Kala69**
 
 ## Lizenz
 
-Dieses Projekt steht unter der MIT-Lizenz - siehe die [LICENSE](LICENSE) Datei für Details.
-
-## GitHub Repository einrichten
-Falls du es **zum ersten Mal hochlädst**:
-```bash
-cd /pfad/zu/deinem/projekt
-git init
-git remote add origin https://github.com/Kala69/ESPAsyncMQTTBroker.git
-git add .
-git commit -m "Erste Version von ESPAsyncMQTTBroker"
-git push -u origin main
+MIT License
