@@ -1,0 +1,23 @@
+{
+  "name": "ESPAsyncMQTTBroker",
+  "version": "1.0.0",
+  "description": "Ein asynchroner MQTT-Broker für ESP32 mit vollständiger MQTT 3.1.1 Unterstützung",
+  "keywords": ["mqtt", "broker", "esp32", "async", "iot"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/parip69/ESPAsyncMQTTBroker.git"
+  },
+  "authors": [
+    {
+      "name": "parip69",
+      "email": "gerhardbachner@gmail.com",
+      "url": "https://github.com/parip69"
+    }
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "me-no-dev/AsyncTCP": "^1.1.1"
+  },
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}
