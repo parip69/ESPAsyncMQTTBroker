@@ -5,11 +5,11 @@
   "keywords": "mqtt, broker, esp32, async, iot",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Kala69/ESPAsyncMQTTBroker.git"
+    "url": "https://github.com/parip/ESPAsyncMQTTBroker.git"
   },
   "authors": [
     {
-      "name": "Kala69",
+      "name": "parip69",
       "email": "gerhardbachner@gmail.com"
     }
   ],

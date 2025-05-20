@@ -1,0 +1,154 @@
+# Push-Fehler Lösung: "rejected (fetch first)"
+
+## Ausführbare Schritte für die aktuelle Situation:
+```
+# SOFORT AUSFÜHREN:
+cd D:\@ESP_D1\LibEsp\ESPAsyncMQTTBroker
+git fetch origin
+git pull --no-rebase origin main
+
+# Falls die Meldung "Already up to date" erscheint, aber push immer noch fehlschlägt:
+git pull --allow-unrelated-histories origin main
+
+# Nach erfolgreicher Integration:
+git push -u origin main
+```
+
+## Wenn obige Schritte nicht funktionieren (Konfliktlösung):
+```
+# Bei Merge-Konflikten:
+# 1. Öffne die konfliktbehafteten Dateien und bearbeite die Konflikte
+# 2. Speichere die Dateien und führe aus:
+git add .
+git commit -m "Merge-Konflikte gelöst"
+git push origin main
+```
+
+## Bei weiterem Fehlschlagen - Repository zurücksetzen:
+```
+# WARNUNG: Dies überschreibt lokale Änderungen mit dem Remote-Stand!
+git fetch origin
+git reset --hard origin/main
+git clean -fd
+
+# Dann erneut Änderungen anwenden und committen
+```
+
+## Alternative bei hartnäckigen Problemen:
+Falls das Repository lokal neu erstellt werden soll, kann ein "force push" helfen.
+**WARNUNG: Dies überschreibt die Remote-Änderungen permanent!**
+
+```
+git push -f origin main
+```
+
+## Minimal erforderliche Dateien für die Arduino-Bibliothek
+
+Für eine funktionsfähige Arduino-Bibliothek sind folgende Dateien und Verzeichnisse ZWINGEND erforderlich:
+
+```
+# Unbedingt erforderliche Dateien:
+src/                   # Enthält den Quellcode (.h und .cpp Dateien)
+library.properties     # Metadaten: Name, Version, Autor, etc.
+README.md              # Grundlegende Dokumentation
+LICENSE                # Lizenzinformationen
+
+# Sehr empfohlen:
+examples/              # Beispielcode zur Verwendung der Bibliothek
+
+# Optional, aber nützlich:
+keywords.txt           # Für Syntaxhervorhebung in der Arduino IDE
+```
+
+Beispiel für minimales Hochladen (nur erforderliche Dateien):
+```
+git add src/
+git add library.properties
+git add README.md
+git add LICENSE
+git add examples/
+git commit -m "Erste funktionsfähige Version von ESPAsyncMQTTBroker"
+git push -u origin main
+```
+
+# Falls du das Repository neu initialisieren möchtest:
+# Stellen Sie sicher, dass Git initialisiert ist
+git init
+
+# Remote-Repository konfigurieren
+git remote add origin https://github.com/parip69/ESPAsyncMQTTBroker.git
+# Fügen Sie alle Verzeichnisse und wichtige Dateien explizit hinzu
+git add examples/
+git add src/
+git add library.properties
+git add LICENSE
+git add README.md
+git add CONTRIBUTING.md
+git add .vscode/arduino.json
+git add .vscode/settings.json
+git add .vscode/tasks.json
+git add arduino_cli.yaml
+git add .gitignore
+
+# Commit erstellen
+git commit -m "Erste vollständige Version von ESPAsyncMQTTBroker"
+
+# Auf GitHub hochladen
+git push -u origin main
+
+## Über keywords.txt
+
+Die Datei `keywords.txt` ist **NICHT zwingend erforderlich** für eine funktionsfähige Arduino-Bibliothek. Sie dient ausschließlich zur Syntaxhervorhebung in der Arduino IDE.
+
+### Funktion:
+- Markiert Klassen, Methoden und Konstanten deiner Bibliothek für die Syntax-Hervorhebung
+- Verbessert die Lesbarkeit des Codes für Benutzer deiner Bibliothek
+- Hilft Benutzern, verfügbare Funktionen leichter zu finden (durch Autovervollständigung)
+
+### Format:
+```
+KEYWORD1    # Klassen und Datentypen (orange hervorgehoben)
+KEYWORD2    # Methoden/Funktionen (braun hervorgehoben)
+LITERAL1    # Konstanten (blau hervorgehoben)
+```
+
+### Beispiel für eine keywords.txt für deine MQTT Broker Bibliothek:
+```
+# Klassen (KEYWORD1)
+ESPAsyncMQTTBroker    KEYWORD1
+
+# Methoden (KEYWORD2)
+begin               KEYWORD2
+end                 KEYWORD2
+publish             KEYWORD2
+subscribe           KEYWORD2
+onMessage           KEYWORD2
+onConnect           KEYWORD2
+onDisconnect        KEYWORD2
+
+# Konstanten (LITERAL1)
+MQTT_QOS0           LITERAL1
+MQTT_QOS1           LITERAL1
+MQTT_QOS2           LITERAL1
+```
+
+Du kannst diese Datei erstellen, wenn du möchtest, aber sie ist nicht notwendig für die Grundfunktionalität deiner Bibliothek.
+
+## Nützliche Links
+
+- **Arduino-Bibliothek veröffentlichen:** 
+  https://github.com/arduino/Arduino/wiki/Library-Manager-FAQ
+
+- **Arduino-Bibliotheken-Spezifikation:**
+  https://arduino.github.io/arduino-cli/0.21/library-specification/
+
+- **GitHub Repository des Projekts:**
+  https://github.com/parip69/ESPAsyncMQTTBroker
+
+- **ESP8266/ESP32 Bibliotheken-Beispiele:**
+  https://www.arduino.cc/reference/en/libraries/category/communication/
+
+- **Kompletter Arduino-Bibliothek-Leitfaden:**
+  https://learn.adafruit.com/contribute-to-arduino-with-arduino-builder/library-manager-specification
+
+Alle diese Ressourcen bieten wertvolle Informationen für die Entwicklung, Strukturierung und Veröffentlichung deiner ESPAsyncMQTTBroker-Bibliothek.
