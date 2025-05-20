@@ -1,4 +1,11 @@
+// @version: 1.4.150 Builddatum 18:53:45 02-04.2025
 #include "ESPAsyncMQTTBroker.h"
+
+// Implementierung der einfacheren publish-Methode, die die vollständigere Variante aufruft
+bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, const char *payload)
+{
+    return publish(topic, qos, retained, payload, "");
+}
 
 ESPAsyncMQTTBroker::ESPAsyncMQTTBroker(uint16_t port) : server(NULL), port(port)
 {
@@ -26,7 +33,7 @@ ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
         delete pair.second;
     }
     persistentSessions.clear();
-    
+
     connectedClientsInfo.clear();
 }
 
@@ -176,11 +183,11 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
     uint8_t header = data[0];
     uint8_t packetType = (header >> 4) & 0x0F;
 
+    // Remaining Length decodieren
     size_t multiplier = 1;
     size_t value = 0;
     uint8_t encodedByte;
     size_t idx = 1;
-
     do
     {
         if (idx >= len)
@@ -200,35 +207,46 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
     case MQTT_CONNECT:
         handleConnect(client, data + idx, value);
         break;
+
     case MQTT_PUBLISH:
         handlePublish(client, data + idx, value, header);
         break;
+
+    case MQTT_PUBACK:
+        // 🚫 QoS 1-Ack vom Client – wir ignorieren es einfach
+        break;
+
     case MQTT_SUBSCRIBE:
         handleSubscribe(client, data + idx, value);
         break;
+
     case MQTT_UNSUBSCRIBE:
         handleUnsubscribe(client, data + idx, value);
         break;
+
     case MQTT_PINGREQ:
         handlePingReq(client);
         break;
+
     case MQTT_DISCONNECT:
         handleDisconnect(client);
         break;
+
     case MQTT_PUBREC:
         handlePubRec(client, data + idx, value);
         break;
+
     case MQTT_PUBREL:
         handlePubRel(client, data + idx, value);
         break;
+
     case MQTT_PUBCOMP:
         handlePubComp(client, data + idx, value);
         break;
+
     default:
-        if (debugLevel >= DEBUG_ERROR)
-        {
-            Serial.println(String("Unbekannter Pakettyp: ") + String(packetType));
-        }
+        // Alle anderen Typen, die wir nicht brauchen, ignorieren
+        // (keine Fehlermeldung mehr für PacketType 4)
         break;
     }
 }
@@ -246,6 +264,18 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
             Serial.println("❌ Paket zu kurz!");
         }
         return;
+    }
+
+    // Protokoll-Version überprüfen
+    uint8_t protocolLevel = data[2 + (data[0] << 8 | data[1])];
+    client->protocolVersion = protocolLevel;
+
+    if (debugLevel >= DEBUG_DEBUG)
+    {
+        Serial.printf("Protokoll-Version: %d (%s)\n",
+                      protocolLevel,
+                      protocolLevel == MQTT_PROTOCOL_LEVEL_5 ? "MQTT 5.0" : protocolLevel == MQTT_PROTOCOL_LEVEL ? "MQTT 3.1.1"
+                                                                                                                 : "Unbekannt");
     }
 
     uint16_t protocolNameLength = (data[0] << 8) | data[1];
@@ -486,7 +516,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         IPAddress ip = client->client->remoteIP();
         String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
         clientConnectCallback(client->clientId, ipStr);
-        
+
         // Speichere Client-Informationen
         connectedClientsInfo[client->clientId] = ipStr;
     }
@@ -536,76 +566,15 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         memcpy(payloadBuffer, data + payloadOffset, copyLength);
         payloadBuffer[copyLength] = 0;
         String payloadStr = String((char *)payloadBuffer);
+        // DEBUG: eingehende Nachricht
+        Serial.printf("🔔 handlePublish – Topic='%s', Payload='%s'\n", topic.c_str(), payloadStr.c_str());
 
         if (messageCallback)
         {
             messageCallback(client->clientId, topic, payloadStr);
-        }
-
-        if (retained)
-        {
-            for (auto it = retainedMessages.begin(); it != retainedMessages.end();)
-            {
-                if ((*it)->topic == topic)
-                {
-                    delete[] (*it)->payload;
-                    delete *it;
-                    it = retainedMessages.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
-            if (payloadLength > 0)
-            {
-                RetainedMessage *msg = new RetainedMessage();
-                msg->topic = topic;
-                msg->payload = new uint8_t[payloadLength];
-                memcpy(msg->payload, data + payloadOffset, payloadLength);
-                msg->length = payloadLength;
-                msg->qos = qos;
-                retainedMessages.push_back(msg);
-            }
-        }
-
-        for (auto c : clients)
-        {
-            if (c != client && c->connected)
-            {
-                for (auto &sub : c->subscriptions)
-                {
-                    if (topicMatches(sub, topic))
-                    {
-                        size_t totalLength = 1 + 1 + 2 + topicLength + payloadLength;
-                        if (totalLength <= MQTT_MAX_PACKET_SIZE)
-                        {
-                            uint8_t packet[MQTT_MAX_PACKET_SIZE];
-                            packet[0] = MQTT_PUBLISH << 4;
-                            packet[1] = totalLength - 2;
-                            packet[2] = topicLength >> 8;
-                            packet[3] = topicLength & 0xFF;
-                            memcpy(packet + 4, topicBuffer, topicLength);
-                            memcpy(packet + 4 + topicLength, data + payloadOffset, payloadLength);
-                            c->client->write((const char *)packet, totalLength);
-                        }
-                        else
-                        {
-                            uint8_t *packet = new uint8_t[totalLength];
-                            packet[0] = MQTT_PUBLISH << 4;
-                            packet[1] = totalLength - 2;
-                            packet[2] = topicLength >> 8;
-                            packet[3] = topicLength & 0xFF;
-                            memcpy(packet + 4, topicBuffer, topicLength);
-                            memcpy(packet + 4 + topicLength, data + payloadOffset, payloadLength);
-                            c->client->write((const char *)packet, totalLength);
-                            delete[] packet;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
+        } // Verwende die erweiterte publish-Methode mit noLocal-Unterstützung
+        // Die Nachricht weiterleiten, aber den absendenden Client ausschließen
+        publish(topic.c_str(), qos, retained, payloadStr.c_str(), client->clientId);
     }
 }
 
@@ -633,8 +602,24 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
         index += topicLength;
         if (index >= length)
             break;
-        uint8_t requestedQoS = data[index++] & 0x03;
-        client->subscriptions.push_back(topic);
+
+        // Options-Byte lesen (bei MQTT 5.0 Subscription Options)
+        uint8_t options = data[index++];
+        uint8_t requestedQoS = options & 0x03;
+        bool noLocal = (options & 0x04) != 0; // Bit 2 = noLocal
+
+        if (debugLevel >= DEBUG_DEBUG)
+        {
+            Serial.printf("Subscribe: Topic '%s', QoS %d, noLocal: %s\n",
+                          topicBuffer, requestedQoS, noLocal ? "true" : "false");
+        }
+
+        // Neue Subscription-Struktur verwenden
+        Subscription sub;
+        sub.filter = topic;
+        sub.noLocal = noLocal;
+        client->subscriptions.push_back(sub);
+
         returnCodes.push_back(requestedQoS);
 
         if (subscribeCallback)
@@ -686,10 +671,9 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
         topicBuffer[topicLength] = 0;
         String topic = String(topicBuffer);
         index += topicLength;
-
         for (auto it = client->subscriptions.begin(); it != client->subscriptions.end();)
         {
-            if (*it == topic)
+            if (it->filter == topic)
             {
                 if (unsubscribeCallback)
                 {
@@ -747,6 +731,11 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *client, uint8_t *data, size_t len)
 {
     // Für QoS 2 Abschluss keine weitere Aktion erforderlich
+}
+
+bool ESPAsyncMQTTBroker::topicMatches(const Subscription &subscription, const String &topic)
+{
+    return topicMatches(subscription.filter, topic);
 }
 
 bool ESPAsyncMQTTBroker::topicMatches(const String &subscription, const String &topic)
@@ -906,4 +895,151 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
         Serial.println("✅ Benutzername und Passwort korrekt");
     }
     return true;
+}
+
+bool ESPAsyncMQTTBroker::publish(const char *topic,
+                                 uint8_t qos,
+                                 bool retained,
+                                 const char *payload,
+                                 const String &excludeClientId)
+{
+    // INFO-Log
+    if (debugLevel >= DEBUG_INFO)
+    {
+        Serial.printf("📤 Broker veröffentlicht auf Topic '%s': %s\n", topic, payload);
+        if (!excludeClientId.isEmpty())
+        {
+            Serial.printf("   - Ausgeschlossener Client: %s\n", excludeClientId.c_str());
+        }
+    }
+
+    String topicStr = String(topic);
+    size_t payloadLen = strlen(payload);
+
+    // Retained-Nachrichten verwalten
+    if (retained)
+    {
+        for (auto it = retainedMessages.begin(); it != retainedMessages.end();)
+        {
+            if ((*it)->topic == topicStr)
+            {
+                delete[] (*it)->payload;
+                delete *it;
+                it = retainedMessages.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        if (payloadLen > 0)
+        {
+            RetainedMessage *msg = new RetainedMessage();
+            msg->topic = topicStr;
+            msg->payload = new uint8_t[payloadLen];
+            memcpy(msg->payload, payload, payloadLen);
+            msg->length = payloadLen;
+            msg->qos = qos;
+            retainedMessages.push_back(msg);
+        }
+    }
+
+    // --- PATCH: Header mit QoS- und Retain-Bits ---
+    uint8_t header = (MQTT_PUBLISH << 4) | (qos << 1) | (retained ? 1 : 0);
+
+    bool messageSent = false;
+    int clientCount = 0;
+    int sentCount = 0;
+
+    for (auto c : clients)
+    {
+        if (!c->connected)
+            continue;
+
+        clientCount++;
+        bool sentToThisClient = false;
+
+        // --- PATCH: Sender ausschließen, ganz unabhängig von ignoreLoopDeliver ---
+        if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
+        {
+            continue;
+        }
+
+        // Durch alle Subscriptions des Clients iterieren
+        for (auto &sub : c->subscriptions)
+        {
+            if (debugLevel >= DEBUG_DEBUG)
+            {
+                Serial.printf("🔍 Prüfe Topic-Match für Client %s: Abo='%s', Eingang='%s'\n",
+                              c->clientId.c_str(), sub.filter.c_str(), topicStr.c_str());
+            }
+
+            bool matched = topicMatches(sub.filter, topicStr);
+            if (debugLevel >= DEBUG_DEBUG)
+            {
+                Serial.printf("  - Match: %s\n", matched ? "✅ JA" : "❌ NEIN");
+            }
+
+            if (matched)
+            {
+                // noLocal-Flag: falls gesetzt, nochmals sicherstellen, dass der Sender nicht bekommt
+                if (sub.noLocal && c->clientId == excludeClientId)
+                {
+                    if (debugLevel >= DEBUG_DEBUG)
+                    {
+                        Serial.printf("  - Client %s wird übersprungen (noLocal)\n", c->clientId.c_str());
+                    }
+                    break;
+                }
+
+                size_t topicLen = topicStr.length();
+                size_t remainingLength = 2 + topicLen + payloadLen;
+
+                // Paket zusammenbauen
+                uint8_t *packet = new uint8_t[1 + 1 + remainingLength];
+                packet[0] = header;
+                packet[1] = remainingLength; // bleibt < 128 Bytes
+                packet[2] = topicLen >> 8;
+                packet[3] = topicLen & 0xFF;
+                memcpy(packet + 4, topicStr.c_str(), topicLen);
+                memcpy(packet + 4 + topicLen, payload, payloadLen);
+
+                if (debugLevel >= DEBUG_DEBUG)
+                {
+                    Serial.printf("📦 Sende Paket an Client ID: %s (Länge: %d)\n",
+                                  c->clientId.c_str(), 1 + 1 + remainingLength);
+                }
+
+                bool writeSuccess = c->client->write((const char *)packet, 1 + 1 + remainingLength);
+                delete[] packet;
+
+                if (writeSuccess)
+                {
+                    sentCount++;
+                    sentToThisClient = true;
+                    messageSent = true;
+                }
+
+                if (debugLevel >= DEBUG_DEBUG)
+                {
+                    Serial.printf("  - Senden %s\n", writeSuccess ? "erfolgreich" : "fehlgeschlagen");
+                }
+
+                break; // pro Client nur einmal senden
+            }
+        }
+
+        if (debugLevel >= DEBUG_DEBUG && !sentToThisClient)
+        {
+            Serial.printf("  - Client %s hat keine passenden Subscriptions für Topic %s\n",
+                          c->clientId.c_str(), topicStr.c_str());
+        }
+    }
+
+    if (debugLevel >= DEBUG_INFO)
+    {
+        Serial.printf("📊 Nachricht gesendet an %d von %d verbundenen Clients\n", sentCount, clientCount);
+    }
+
+    return messageSent;
 }
