@@ -1,7 +1,0 @@
-.pio
-build/
-*.o
-*.a
-*.d
-*.exe
-*.bin

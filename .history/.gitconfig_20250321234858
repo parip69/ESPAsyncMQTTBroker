@@ -1,7 +1,0 @@
-[http]
-    sslVerify = false
-[http "https://github.com"]
-    sslVerify = false
-[user]
-    name = Kala69
-    email = gerhardbachner@gmail.com
