@@ -53,9 +53,12 @@ void loop() {
 
 ## Beispiele
 
-- [`examples/BasicBroker`](examples/BasicBroker)
-- [`examples/WithWebServer`](examples/WithWebServer)
-- [`examples/ControlLED`](examples/ControlLED)
+- [`examples/BasicBroker`](examples/BasicBroker) - Grundlegende Broker-Funktionalität
+- [`examples/WithWebServer`](examples/WithWebServer) - MQTT-Broker mit Webserver
+- [`examples/ControlLED`](examples/ControlLED) - Steuerung einer LED über MQTT
+- [`examples/SimpleMQTTBroker`](examples/SimpleMQTTBroker) - Einfacher MQTT-Broker ohne Extras
+- [`examples/MQTTClient`](examples/MQTTClient) - ESP32 als MQTT-Client
+- [`examples/DualModeBrokerClient`](examples/DualModeBrokerClient) - ESP32 als Broker und Client (umschaltbar)
 
 ## GitHub Actions
 
