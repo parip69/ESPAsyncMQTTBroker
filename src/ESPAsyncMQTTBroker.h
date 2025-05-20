@@ -1,3 +1,4 @@
+// @version: 1.4.150 Builddatum 18:53:45 02-04.2025
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -30,7 +31,8 @@
 #define MQTT_QOS2 2
 
 // Andere Konstanten
-#define MQTT_PROTOCOL_LEVEL 4 // MQTT 3.1.1
+#define MQTT_PROTOCOL_LEVEL 4   // MQTT 3.1.1
+#define MQTT_PROTOCOL_LEVEL_5 5 // MQTT 5.0
 #define MQTT_MAX_PACKET_SIZE 1024
 
 // Debug Level
@@ -42,6 +44,14 @@ enum DebugLevel
     DEBUG_DEBUG = 3
 };
 
+// Neue Struktur für ein Abonnement
+struct Subscription
+{
+    String filter;
+    bool noLocal; // MQTT 5.0 noLocal-Flag
+    // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
+};
+
 // Client-Struktur
 struct MQTTClient
 {
@@ -51,7 +61,8 @@ struct MQTTClient
     uint32_t lastActivity;
     uint16_t keepAlive; // Keep-Alive Intervall in Sekunden
     bool cleanSession;
-    std::vector<String> subscriptions;
+    std::vector<Subscription> subscriptions;
+    uint8_t protocolVersion; // MQTT Protokoll-Version: 4 = MQTT 3.1.1, 5 = MQTT 5.0
 };
 
 // Datenstruktur für gespeicherte Nachrichten (retained)
@@ -68,6 +79,7 @@ struct ESPAsyncMQTTBrokerConfig
 {
     String username = "";
     String password = "";
+    bool ignoreLoopDeliver = false; // broker-spezifisch für MQTT 3.1.1
 };
 
 typedef std::function<void(String clientId, String clientIp)> ClientCallback;
@@ -82,9 +94,13 @@ class ESPAsyncMQTTBroker
 public:
     ESPAsyncMQTTBroker(uint16_t port = 1883);
     ~ESPAsyncMQTTBroker();
-
     void begin();
     void stop();
+    // AsyncMqttClient‐konforme Signatur: topic, qos, retain, payload
+    bool publish(const char *topic, uint8_t qos, bool retained = false, const char *payload = "");
+
+    // Erweiterte publish-Methode mit Client-ID für noLocal-Unterstützung
+    bool publish(const char *topic, uint8_t qos, bool retained, const char *payload, const String &excludeClientId);
 
     // Konfiguration und Debug-Einstellungen
     void setConfig(const ESPAsyncMQTTBrokerConfig &config);
@@ -137,8 +153,8 @@ private:
     void handlePubRec(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubRel(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubComp(MQTTClient *client, uint8_t *data, size_t len);
-
     void processPacket(MQTTClient *client, uint8_t *data, size_t len);
+    bool topicMatches(const Subscription &subscription, const String &topic);
     bool topicMatches(const String &subscription, const String &topic);
     void sendRetainedMessages(MQTTClient *client);
 
