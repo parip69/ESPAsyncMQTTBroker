@@ -1,4 +1,3 @@
-// @version: 1.4.150 Builddatum 18:53:45 02-04.2025
 #include "ESPAsyncMQTTBroker.h"
 
 // Implementierung der einfacheren publish-Methode, die die vollständigere Variante aufruft
