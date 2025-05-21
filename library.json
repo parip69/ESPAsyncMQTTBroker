@@ -1,0 +1,5 @@
+// @version: 1.4.150 Builddatum 18:53:45 02-04.2025
+{
+  "name": "ESPAsyncMQTTBroker",
+  "version": "0.0.0+20250325115522"
+}

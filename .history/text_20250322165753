@@ -1,9 +1,0 @@
-# Dann erneut versuchen
-git add .
-git commit -m "Füge Dokumentation und Mitwirkungsrichtlinien hinzu"
-git push -u origin main
-
-
-git add .
-git commit -m "Füge Dokumentation und Mitwirkungsrichtlinien hinzu"
-git push
