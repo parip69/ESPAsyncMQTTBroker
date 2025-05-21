@@ -47,7 +47,6 @@ void setup() {
 }
 
 void loop() {
-  mqtt.loop();
 }
 ```
 

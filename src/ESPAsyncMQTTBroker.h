@@ -1,4 +1,4 @@
-// @version: 1.4.150 Builddatum 18:53:45 02-04.2025
+// @version: 1.4.150
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -63,6 +63,7 @@ struct MQTTClient
     bool cleanSession;
     std::vector<Subscription> subscriptions;
     uint8_t protocolVersion; // MQTT Protokoll-Version: 4 = MQTT 3.1.1, 5 = MQTT 5.0
+    ESPAsyncMQTTBroker* broker;
 };
 
 // Datenstruktur für gespeicherte Nachrichten (retained)
@@ -79,7 +80,6 @@ struct ESPAsyncMQTTBrokerConfig
 {
     String username = "";
     String password = "";
-    bool ignoreLoopDeliver = false; // broker-spezifisch für MQTT 3.1.1
 };
 
 typedef std::function<void(String clientId, String clientIp)> ClientCallback;

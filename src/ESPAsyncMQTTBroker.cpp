@@ -1,4 +1,4 @@
-// @version: 1.4.150 Builddatum 18:53:45 02-04.2025
+// @version: 1.4.150
 #include "ESPAsyncMQTTBroker.h"
 
 // Implementierung der einfacheren publish-Methode, die die vollständigere Variante aufruft
@@ -114,62 +114,67 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 {
     MQTTClient *mqttClient = new MQTTClient();
     mqttClient->client = client;
+    mqttClient->broker = this; // Initialize broker member
     mqttClient->connected = false;
     mqttClient->lastActivity = millis();
     mqttClient->keepAlive = 0; // Wird im CONNECT gesetzt
     mqttClient->cleanSession = true;
 
-    client->onData([](void *arg, AsyncClient *client, void *data, size_t len)
+    client->onData([](void *arg, AsyncClient *aclient_unused, void *data, size_t len)
                    {
-        ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* mqttClient = nullptr;
-        for (auto c : broker->clients) {
-            if (c->client == client) {
-                mqttClient = c;
-                break;
-            }
-        }
-        if (mqttClient) {
-            broker->processPacket(mqttClient, (uint8_t*)data, len);
+        MQTTClient* mqttClient = (MQTTClient*)arg;
+        if (mqttClient) { // Should always be true if arg is correctly set
+            mqttClient->broker->processPacket(mqttClient, (uint8_t*)data, len);
             mqttClient->lastActivity = millis();
-        } }, this);
+        } 
+        // else { if (mqttClient && mqttClient->broker && mqttClient->broker->debugLevel >= DEBUG_ERROR) Serial.println("Error: mqttClient is null in onData"); }
+                   }, mqttClient); // Pass mqttClient as argument here
 
-    client->onDisconnect([](void *arg, AsyncClient *client)
+    client->onDisconnect([](void *arg, AsyncClient *aclient_unused)
                          {
-        ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* target = nullptr;
-        for (auto it = broker->clients.begin(); it != broker->clients.end(); ++it) {
-            if ((*it)->client == client) {
-                target = *it;
-                if (!target->cleanSession) {
-                    broker->persistentSessions[target->clientId] = target;
-                    target->client = nullptr;
-                } else {
-                    if (broker->clientDisconnectCallback) {
-                        broker->clientDisconnectCallback(target->clientId);
+        MQTTClient* mqttClient = (MQTTClient*)arg;
+        if (mqttClient) { // Should always be true
+            ESPAsyncMQTTBroker* broker = mqttClient->broker; // Get broker pointer
+            bool found = false;
+            for (auto it = broker->clients.begin(); it != broker->clients.end(); ++it) {
+                if (*it == mqttClient) { // Compare MQTTClient pointers
+                    if (!mqttClient->cleanSession) {
+                        // If clientId is empty, it means CONNECT was not completed or failed.
+                        // Avoid creating persistent session for such clients.
+                        if (!mqttClient->clientId.isEmpty()) {
+                            broker->persistentSessions[mqttClient->clientId] = mqttClient;
+                        }
+                        mqttClient->client = nullptr; // Nullify AsyncClient pointer as it's disconnected
+                        // Do not delete mqttClient here if it's part of a persistent session
+                    } else {
+                        if (broker->clientDisconnectCallback && !mqttClient->clientId.isEmpty()) {
+                            broker->clientDisconnectCallback(mqttClient->clientId);
+                        }
+                        if(!mqttClient->clientId.isEmpty()){
+                           broker->connectedClientsInfo.erase(mqttClient->clientId);
+                        }
+                        delete mqttClient; // Delete the MQTTClient object for clean sessions
                     }
-                    // Entferne Client aus der Client-Informationen-Map
-                    broker->connectedClientsInfo.erase(target->clientId);
-                    delete target;
-                    broker->clients.erase(it);
+                    broker->clients.erase(it); // Erase from the vector
+                    found = true;
+                    break;
                 }
-                break;
             }
-        } }, this);
-
-    client->onError([](void *arg, AsyncClient *client, int8_t error)
-                    {
-        ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* mqttClient = nullptr;
-        for (auto c : broker->clients) {
-            if (c->client == client) {
-                mqttClient = c;
-                break;
-            }
+            // if (!found && broker->debugLevel >= DEBUG_ERROR) {
+            //     Serial.println(String("Error: Disconnected client ") + (mqttClient->clientId.isEmpty() ? "[NO_ID]" : mqttClient->clientId) + " not found in main list for removal!");
+            // }
         }
-        if (broker->errorCallback && mqttClient) {
-            broker->errorCallback(mqttClient->clientId, error, "Client Error");
-        } }, this);
+        // else { if (mqttClient && mqttClient->broker && mqttClient->broker->debugLevel >= DEBUG_ERROR) Serial.println("Error: mqttClient is null in onDisconnect"); }
+                         }, mqttClient); // Pass mqttClient as argument here
+
+    client->onError([](void *arg, AsyncClient *aclient_unused, int8_t error)
+                    {
+        MQTTClient* mqttClient = (MQTTClient*)arg;
+        if (mqttClient && mqttClient->broker && mqttClient->broker->errorCallback && !mqttClient->clientId.isEmpty()) {
+            mqttClient->broker->errorCallback(mqttClient->clientId, error, "Client Error");
+        }
+        // else { if (mqttClient && mqttClient->broker && mqttClient->broker->debugLevel >= DEBUG_ERROR) Serial.println("Error: mqttClient or broker or callback is null in onError"); }
+                    }, mqttClient); // Pass mqttClient as argument here
 
     // Den onTimeOut-Callback entfernen, da der Timer den Timeout prüft.
 
