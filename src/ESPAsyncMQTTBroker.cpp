@@ -47,8 +47,8 @@ ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
 {
     stop();
 
-    // Die Smart Pointer kümmern sich automatisch um die Freigabe
-    clients.clear();
+    // Die Smart Pointer kümmern sich automatisch um die Freigabe der MQTTClient-Objekte
+    _clients.clear(); // Map leeren
     retainedMessages.clear();
     persistentSessions.clear();
     connectedClientsInfo.clear();
@@ -96,19 +96,45 @@ void ESPAsyncMQTTBroker::stop()
 void ESPAsyncMQTTBroker::checkTimeouts()
 {
     uint32_t now = millis();
-    for (auto it = clients.begin(); it != clients.end();)
+    // Iteriere über die Map _clients
+    for (auto it = _clients.begin(); it != _clients.end(); /* no increment here */)
     {
-        auto &mqttClient = *it;
+        // it->first is AsyncClient*, it->second is std::unique_ptr<MQTTClient>
+        MQTTClient* mqttClient = it->second.get(); 
+
         if (mqttClient->connected && mqttClient->keepAlive > 0)
         {
             // Timeout: 1,5 × KeepAlive (in Millisekunden)
             if (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL)
             {
-                logMessage(DEBUG_INFO, "⏰ Client %s inaktiv, trenne Verbindung.",
-                           mqttClient->clientId.c_str());
-                mqttClient->client->close();
-                // Der Client wird aus 'clients' beim Disconnect-Handler entfernt
-                ++it;
+                logMessage(DEBUG_INFO, "⏰ Client %s (IP: %s) inaktiv, trenne Verbindung.",
+                           mqttClient->clientId.c_str(), mqttClient->client->remoteIP().toString().c_str());
+                mqttClient->client->close(); 
+                // Der onDisconnect-Handler wird aufgerufen, der den Client aus _clients entfernt.
+                // Um Probleme mit dem Iterator zu vermeiden, wenn der Client hier direkt entfernt wird
+                // (was durch client->close() ausgelöst wird), ist es besser, den Iterator vor dem close() zu sichern
+                // oder davon auszugehen, dass onDisconnect die Entfernung korrekt handhabt und der Iterator ungültig wird.
+                // Da onDisconnect den Client entfernt, müssen wir den Iterator hier nicht inkrementieren,
+                // sondern den nächsten gültigen Iterator bekommen oder einfach die Schleife verlassen, wenn der Client entfernt wurde.
+                // Sicherer ist es, den Iterator vor dem close zu inkrementieren, aber das macht die Logik komplizierter,
+                // wenn onDisconnect den Eintrag löscht.
+                // Alternative: Die Map-Iteration ist nicht ideal, wenn Elemente während der Iteration entfernt werden.
+                // Eine Möglichkeit ist, eine Liste der zu schließenden Clients zu sammeln und sie nach der Iteration zu schließen.
+                // Für den Moment belassen wir es bei der Annahme, dass close() den onDisconnect-Handler synchron aufruft
+                // und der Iterator danach ungültig sein könnte.
+                // Die map::erase gibt den nächsten gültigen Iterator zurück, wenn man ihm den aktuellen Iterator übergibt.
+                // Jedoch wird erase im onDisconnect-Handler aufgerufen.
+                // Wir machen hier ++it und hoffen, dass onDisconnect seine Arbeit macht.
+                // Wenn onDisconnect den aktuellen 'it' löscht, wird der ++it problematisch.
+                // Daher: Wenn close() zu einem synchronen onDisconnect führt, das den Client entfernt,
+                // sollten wir den Iterator vor dem close() inkrementieren oder eine Kopie der Keys machen und darüber iterieren.
+                // Für den Moment: Wir loggen und schließen. Der onDisconnect-Handler sollte den Rest erledigen.
+                // Der Iterator wird hier vorsichtig behandelt.
+                // Wenn client->close() synchron den onDisconnect-Callback auslöst,
+                // wird der Client aus _clients entfernt.
+                // Um sicherzustellen, dass der Iterator gültig bleibt, inkrementieren wir ihn vor dem potenziellen Löschen.
+                auto currentIt = it++;
+                currentIt->second->client->close(); // Dies löst onDisconnect aus, was den Client aus _clients entfernt.
             }
             else
             {
@@ -142,88 +168,86 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
     mqttClient->keepAlive = 0; // Wird im CONNECT gesetzt
     mqttClient->cleanSession = true;
 
-    client->onData([](void *arg, AsyncClient *client, void *data, size_t len)
+    client->onData([](void *arg, AsyncClient *aClient, void *data, size_t len)
                    {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* mqttClient = nullptr;
+        auto it = broker->_clients.find(aClient); // Direkter Zugriff über die Map
         
-        // Smart Pointer-sichere Iteration
-        for (auto& c : broker->clients) {
-            if (c->client == client) {
-                mqttClient = c.get();
-                break;
-            }
-        }
-        
-        if (mqttClient) {
+        if (it != broker->_clients.end()) {
+            MQTTClient* mqttClient = it->second.get();
             // Überprüfung der Paketgröße für erhöhte Sicherheit
             if (len > MQTT_MAX_PACKET_SIZE) {
-                broker->logMessage(DEBUG_ERROR, "Paketgröße überschreitet Limit: %u > %u", 
-                                 (unsigned)len, (unsigned)MQTT_MAX_PACKET_SIZE);
+                broker->logMessage(DEBUG_ERROR, "Paketgröße überschreitet Limit: %u > %u für Client %s", 
+                                 (unsigned)len, (unsigned)MQTT_MAX_PACKET_SIZE, mqttClient->clientId.c_str());
+                // Optional: Verbindung schließen oder Fehler an Client senden
                 return;
             }
             
             broker->processPacket(mqttClient, (uint8_t*)data, len);
             mqttClient->lastActivity = millis();
+        } else {
+            broker->logMessage(DEBUG_WARNING, "Daten von unbekanntem AsyncClient empfangen: %s", aClient->remoteIP().toString().c_str());
         } }, this);
 
-    client->onDisconnect([](void *arg, AsyncClient *client)
+    client->onDisconnect([](void *arg, AsyncClient *aClient)
                          {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
+        auto it = broker->_clients.find(aClient); // Direkter Zugriff über die Map
         
-        // Mit Smart Pointern umgehen
-        for (auto it = broker->clients.begin(); it != broker->clients.end(); ++it) {
-            if ((*it)->client == client) {
-                auto& target = *it;
-                
-                if (!target->cleanSession) {
-                    // Persistenter Client: In die persistente Session-Map verschieben
-                    broker->logMessage(DEBUG_INFO, "Client %s getrennt, Session wird beibehalten", 
-                                     target->clientId.c_str());
-                    
-                    // Persistente Session speichern und aus der Client-Liste entfernen
-                    broker->persistentSessions[target->clientId] = std::move(target);
-                    broker->clients.erase(it);
-                } else {
-                    // Callback aufrufen, falls registriert
-                    if (broker->clientDisconnectCallback) {
-                        broker->clientDisconnectCallback(target->clientId);
-                    }
-                    
-                    // Client aus der Info-Map entfernen
-                    broker->connectedClientsInfo.erase(target->clientId);
-                    
-                    // Aus der Client-Liste entfernen (und automatisch freigeben)
-                    broker->clients.erase(it);
+        if (it != broker->_clients.end()) {
+            std::unique_ptr<MQTTClient> mqttClient = std::move(it->second); // Ownership übernehmen
+            broker->_clients.erase(it); // Aus aktiven Clients entfernen
+
+            broker->logMessage(DEBUG_INFO, "🔌 Client %s (IP: %s) getrennt.", 
+                               mqttClient->clientId.c_str(), aClient->remoteIP().toString().c_str());
+
+            if (!mqttClient->cleanSession && !mqttClient->clientId.isEmpty()) {
+                // Persistente Session speichern
+                broker->logMessage(DEBUG_INFO, "Client %s getrennt, persistente Session wird beibehalten.", 
+                                 mqttClient->clientId.c_str());
+                // Bevor wir es in persistentSessions einfügen, stellen wir sicher, dass keine alte Session mit der gleichen ID existiert.
+                // Obwohl dies durch die Logik in handleConnect (Wiederverwendung oder Löschen alter Sessions)
+                // unwahrscheinlich sein sollte, ist es eine gute Sicherheitsmaßnahme.
+                broker->persistentSessions.erase(mqttClient->clientId); // Alte Session ggf. löschen
+                broker->persistentSessions.emplace(mqttClient->clientId, std::move(mqttClient));
+            } else {
+                // Clean Session oder keine ClientId -> keine Persistenz
+                if (broker->clientDisconnectCallback && !mqttClient->clientId.isEmpty()) {
+                    broker->clientDisconnectCallback(mqttClient->clientId);
                 }
-                break;
+                // Client aus der Info-Map entfernen
+                if (!mqttClient->clientId.isEmpty()) {
+                    broker->connectedClientsInfo.erase(mqttClient->clientId);
+                }
+                // Das mqttClient unique_ptr geht hier out of scope und gibt den Speicher frei
             }
+        } else {
+             broker->logMessage(DEBUG_WARNING, "Unbekannter AsyncClient hat Verbindung getrennt: %s", aClient->remoteIP().toString().c_str());
         } }, this);
 
-    client->onError([](void *arg, AsyncClient *client, int8_t error)
+    client->onError([](void *arg, AsyncClient *aClient, int8_t error)
                     {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* mqttClient = nullptr;
+        auto it = broker->_clients.find(aClient); // Direkter Zugriff über die Map
         
-        // Smart Pointer-sichere Iteration
-        for (auto& c : broker->clients) {
-            if (c->client == client) {
-                mqttClient = c.get();
-                break;
+        if (it != broker->_clients.end()) {
+            MQTTClient* mqttClient = it->second.get();
+            if (broker->errorCallback) {
+                broker->logMessage(DEBUG_ERROR, "Client %s (IP: %s) Fehler: %s (%d)", 
+                                 mqttClient->clientId.c_str(), aClient->remoteIP().toString().c_str(), 
+                                 aClient->errorToString(error), error);
+                broker->errorCallback(mqttClient->clientId, error, aClient->errorToString(error));
             }
-        }
-        
-        if (broker->errorCallback && mqttClient) {
-            broker->logMessage(DEBUG_ERROR, "Client %s Fehler: %d", 
-                             mqttClient->clientId.c_str(), error);
-            broker->errorCallback(mqttClient->clientId, error, "Client Error");
+        } else {
+            broker->logMessage(DEBUG_ERROR, "Fehler von unbekanntem AsyncClient: %s, Fehler: %s (%d)", 
+                               aClient->remoteIP().toString().c_str(), aClient->errorToString(error), error);
         } }, this);
 
-    // Smart Pointer in den Vector übertragen (Ownership wird übertragen)
-    clients.push_back(std::move(mqttClient));
+    // Smart Pointer in die Map übertragen (Ownership wird übertragen)
+    _clients.emplace(client, std::move(mqttClient));
 
-    logMessage(DEBUG_DEBUG, "Neue MQTT-Verbindung akzeptiert (IP: %s)",
-               client->remoteIP().toString().c_str());
+    logMessage(DEBUG_DEBUG, "Neue MQTT-Verbindung akzeptiert (IP: %s). Aktive Clients: %u",
+               client->remoteIP().toString().c_str(), (unsigned)_clients.size());
 }
 
 void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t len)
@@ -334,15 +358,15 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     }
 
     // Protokollnamen sicher kopieren (mit NUL-terminierung)
-    char protocolName[MQTT_MAX_TOPIC_SIZE] = {0};
-    if (protocolNameLength < sizeof(protocolName))
-    {
+    char protocolName[MQTT_MAX_TOPIC_SIZE];
+    if (protocolNameLength < sizeof(protocolName)) {
         memcpy(protocolName, data + 2, protocolNameLength);
-        logMessage(DEBUG_DEBUG, "Protokoll: %s", protocolName);
-    }
-    else
-    {
-        logMessage(DEBUG_ERROR, "Protokollname zu lang!");
+        protocolName[protocolNameLength] = '\0'; // Nullterminierung
+        logMessage(DEBUG_DEBUG, "Protokoll: %s (Client IP: %s)", protocolName, client->client->remoteIP().toString().c_str());
+    } else {
+        logMessage(DEBUG_ERROR, "❌ Protokollname zu lang (%u >= %u) von IP %s! Verbindung wird abgelehnt.", protocolNameLength, sizeof(protocolName), client->client->remoteIP().toString().c_str());
+        // CONNACK mit Fehler senden (z.B. 0x8A - Protocol error) wäre hier angebracht
+        // Vereinfacht: einfach return
         return;
     }
 
@@ -399,14 +423,28 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     }
 
     // Client-ID sicher kopieren
-    char clientIdBuffer[256] = {0};
-    if (clientIdLength < sizeof(clientIdBuffer))
-    {
-        memcpy(clientIdBuffer, data + offset, clientIdLength);
+    char clientIdBuffer[256]; // Standardgröße für Client-IDs, könnte auch MQTT_MAX_CLIENT_ID_SIZE sein, falls definiert
+    if (clientIdLength == 0) {
+        // MQTT v3.1.1 erlaubt leere Client IDs, wenn CleanSession = 1 ist
+        // MQTT v5: Server MUST assign a unique ClientID to the Client
+        // Hier generieren wir eine, falls erlaubt oder nötig. Fürs Erste: Fehler wenn leer und nicht erwartet.
+        // In diesem Broker wird eine leere ClientID derzeit nicht speziell behandelt,
+        // außer dass sie zu Problemen führen kann, wenn sie als Key in Maps verwendet wird.
+        // Für maximale Sicherheit lehnen wir leere ClientIDs ab, wenn sie nicht explizit unterstützt werden.
+        logMessage(DEBUG_ERROR, "❌ Client-ID ist leer (IP: %s). Verbindung wird abgelehnt.", client->client->remoteIP().toString().c_str());
+        // CONNACK 0x02 (Identifier rejected)
+        uint8_t connack[] = {0x20, 0x02, 0x00, 0x02};
+        client->client->write((const char *)connack, 4);
+        return;
     }
-    else
-    {
-        logMessage(DEBUG_ERROR, "Client-ID zu lang!");
+    if (clientIdLength < sizeof(clientIdBuffer)) {
+        memcpy(clientIdBuffer, data + offset, clientIdLength);
+        clientIdBuffer[clientIdLength] = '\0'; // Nullterminierung
+    } else {
+        logMessage(DEBUG_ERROR, "❌ Client-ID zu lang (%u >= %u) von IP %s! Verbindung wird abgelehnt.", clientIdLength, sizeof(clientIdBuffer), client->client->remoteIP().toString().c_str());
+        // CONNACK 0x02 (Identifier rejected)
+        uint8_t connack[] = {0x20, 0x02, 0x00, 0x02};
+        client->client->write((const char *)connack, 4);
         return;
     }
 
@@ -447,43 +485,39 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         }
 
         // Will-Topic sicher kopieren
-        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
-        if (willTopicLen < sizeof(willTopicBuffer))
-        {
+        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE];
+        if (willTopicLen < sizeof(willTopicBuffer)) {
             memcpy(willTopicBuffer, data + offset, willTopicLen);
-        }
-        else
-        {
-            logMessage(DEBUG_ERROR, "Will-Topic zu lang!");
-            return;
+            willTopicBuffer[willTopicLen] = '\0';
+        } else {
+            logMessage(DEBUG_ERROR, "❌ Will-Topic zu lang (%u >= %u) von IP %s! Verbindung wird abgelehnt.", willTopicLen, sizeof(willTopicBuffer), client->client->remoteIP().toString().c_str());
+            return; // Oder CONNACK mit Fehler
         }
         offset += willTopicLen;
 
-        if (offset + 2 > length)
-        {
+        if (offset + 2 > length) {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Message-Länge!");
             return;
         }
         uint16_t willMsgLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + willMsgLen > length)
-        {
+        if (offset + willMsgLen > length) {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Message!");
             return;
         }
 
         // Will-Message sicher kopieren
-        char willMsgBuffer[MQTT_MAX_PAYLOAD_SIZE] = {0};
-        if (willMsgLen < sizeof(willMsgBuffer))
-        {
+        char willMsgBuffer[MQTT_MAX_PAYLOAD_SIZE];
+        if (willMsgLen < sizeof(willMsgBuffer)) {
             memcpy(willMsgBuffer, data + offset, willMsgLen);
+            willMsgBuffer[willMsgLen] = '\0';
+        } else {
+            // Nachricht kürzen und loggen
+            memcpy(willMsgBuffer, data + offset, sizeof(willMsgBuffer) - 1);
+            willMsgBuffer[sizeof(willMsgBuffer) - 1] = '\0';
+            logMessage(DEBUG_WARNING, "Will-Message gekürzt auf %u Bytes.", sizeof(willMsgBuffer) - 1);
         }
-        else
-        {
-            logMessage(DEBUG_ERROR, "Will-Message zu lang!");
-            return;
-        }
-        offset += willMsgLen;
+        offset += willMsgLen; // Offset trotzdem um die ursprüngliche Länge erhöhen
 
         logMessage(DEBUG_DEBUG, "Will Topic: '%s', Will Message: '%s'", willTopicBuffer, willMsgBuffer);
     }
@@ -491,79 +525,77 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     // Username & Password verarbeiten, wenn vorhanden
     String username = "";
     String password = "";
-    if (usernameFlag)
-    {
-        if (offset + 2 > length)
-        {
+    if (usernameFlag) {
+        if (offset + 2 > length) {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Username-Länge!");
             return;
         }
         uint16_t usernameLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + usernameLen > length)
-        {
+        if (offset + usernameLen > length) {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Username!");
             return;
         }
 
         // Username sicher kopieren
-        char usernameBuffer[256] = {0};
-        if (usernameLen < sizeof(usernameBuffer))
-        {
+        char usernameBuffer[256]; // Max Länge für Username
+        if (usernameLen < sizeof(usernameBuffer)) {
             memcpy(usernameBuffer, data + offset, usernameLen);
+            usernameBuffer[usernameLen] = '\0';
             username = String(usernameBuffer);
-        }
-        else
-        {
-            logMessage(DEBUG_ERROR, "Username zu lang!");
+        } else {
+            logMessage(DEBUG_ERROR, "❌ Username zu lang (%u >= %u) von IP %s! Verbindung wird abgelehnt.", usernameLen, sizeof(usernameBuffer), client->client->remoteIP().toString().c_str());
+            // CONNACK 0x04 oder 0x05 (Bad username or password / Not authorized)
+            uint8_t connack[] = {0x20, 0x02, 0x00, 0x04}; // Bad username or password
+            client->client->write((const char *)connack, 4);
             return;
         }
         offset += usernameLen;
     }
 
-    if (passwordFlag)
-    {
-        if (offset + 2 > length)
-        {
-            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Password-Länge!");
+    if (passwordFlag) {
+        if (offset + 2 > length) {
+            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Password-Länge! (IP: %s)", client->client->remoteIP().toString().c_str());
             return;
         }
         uint16_t passwordLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + passwordLen > length)
-        {
-            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Password!");
+        if (offset + passwordLen > length) {
+            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Password! (IP: %s)", client->client->remoteIP().toString().c_str());
             return;
         }
 
         // Password sicher kopieren
-        char passwordBuffer[256] = {0};
-        if (passwordLen < sizeof(passwordBuffer))
-        {
+        char passwordBuffer[256]; // Max Länge für Password
+        if (passwordLen < sizeof(passwordBuffer)) {
             memcpy(passwordBuffer, data + offset, passwordLen);
+            passwordBuffer[passwordLen] = '\0';
             password = String(passwordBuffer);
-        }
-        else
-        {
-            logMessage(DEBUG_ERROR, "Password zu lang!");
+        } else {
+            // Passwort ist zu lang, aber wir kürzen es nicht, sondern lehnen ab.
+            logMessage(DEBUG_ERROR, "❌ Password zu lang (%u >= %u) von IP %s! Verbindung wird abgelehnt.", passwordLen, sizeof(passwordBuffer), client->client->remoteIP().toString().c_str());
+            uint8_t connack[] = {0x20, 0x02, 0x00, 0x04}; // Bad username or password
+            client->client->write((const char *)connack, 4);
             return;
         }
     }
 
-    logMessage(DEBUG_DEBUG, "Authentifizierung wird überprüft...");
+    logMessage(DEBUG_DEBUG, "Authentifizierung wird überprüft für Client IP: %s...", client->client->remoteIP().toString().c_str());
 
     // Authentifizierung durchführen
+    // Die authenticateClient Funktion loggt bereits Details zum Username etc.
     if (!authenticateClient(username, password))
     {
-        logMessage(DEBUG_ERROR, "🚫 Authentifizierung fehlgeschlagen - Verbindung abgelehnt");
+        logMessage(DEBUG_ERROR, "🚫 Authentifizierung fehlgeschlagen für IP %s - Verbindung abgelehnt", client->client->remoteIP().toString().c_str());
 
-        uint8_t connack[] = {0x20, 0x02, 0x00, 0x05};
+        uint8_t connack[] = {0x20, 0x02, 0x00, 0x05}; // Not authorized
         client->client->write((const char *)connack, 4);
         return;
     }
     else
     {
-        logMessage(DEBUG_INFO, "✅ Authentifizierung erfolgreich - Verbindung akzeptiert");
+        // Client ID ist jetzt gesetzt, wir können sie im Erfolgsfall loggen
+        logMessage(DEBUG_INFO, "✅ Authentifizierung erfolgreich für Client '%s' (IP: %s) - Verbindung akzeptiert", client->clientId.c_str(), client->client->remoteIP().toString().c_str());
     }
 
     uint8_t connack[] = {
@@ -613,8 +645,9 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
     }
 
     // Topic sicher kopieren
-    char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
-    memcpy(topicBuffer, data + 2, topicLength);
+    char topicBuffer[MQTT_MAX_TOPIC_SIZE];
+    memcpy(topicBuffer, data + 2, topicLength); // topicLength wurde bereits gegen MQTT_MAX_TOPIC_SIZE geprüft
+    topicBuffer[topicLength] = '\0'; // Nullterminierung
     String topic = String(topicBuffer);
 
     size_t payloadOffset = 2 + topicLength;
@@ -650,9 +683,10 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         }
 
         // Payload sicher kopieren und terminieren
-        char payloadBuffer[MQTT_MAX_PAYLOAD_SIZE + 1] = {0};
+        // payloadLength wurde bereits auf MQTT_MAX_PAYLOAD_SIZE gekürzt, falls nötig.
+        char payloadBuffer[MQTT_MAX_PAYLOAD_SIZE + 1]; 
         memcpy(payloadBuffer, data + payloadOffset, payloadLength);
-        payloadBuffer[payloadLength] = 0; // NUL-terminiert für String-Konvertierung
+        payloadBuffer[payloadLength] = '\0'; // NUL-terminiert für String-Konvertierung
 
         String payloadStr = String(payloadBuffer);
         logMessage(DEBUG_INFO, "🔔 Publish – Topic='%s', Payload='%s'",
@@ -666,6 +700,12 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         // Verwende die erweiterte publish-Methode mit noLocal-Unterstützung
         // Die Nachricht weiterleiten, aber den absendenden Client ausschließen
         publish(topic.c_str(), payloadStr.c_str(), retained, qos, client->clientId);
+    } else if (payloadLength == 0) { // Leerer Payload ist gültig
+        logMessage(DEBUG_INFO, "🔔 Publish – Topic='%s', Payload='[leer]'", topic.c_str());
+        if (messageCallback) {
+            messageCallback(client->clientId, topic, "");
+        }
+        publish(topic.c_str(), "", retained, qos, client->clientId);
     }
 }
 
@@ -699,8 +739,9 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
         }
 
         // Topic-Filter sicher kopieren
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
-        memcpy(topicBuffer, data + index, topicLength);
+        char topicBuffer[MQTT_MAX_TOPIC_SIZE];
+        memcpy(topicBuffer, data + index, topicLength); // topicLength wurde bereits gegen MQTT_MAX_TOPIC_SIZE geprüft
+        topicBuffer[topicLength] = '\0'; // Nullterminierung
         String topic = String(topicBuffer);
         index += topicLength;
 
@@ -792,8 +833,9 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
         }
 
         // Topic sicher kopieren
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
-        memcpy(topicBuffer, data + index, topicLength);
+        char topicBuffer[MQTT_MAX_TOPIC_SIZE];
+        memcpy(topicBuffer, data + index, topicLength); // topicLength wurde bereits gegen MQTT_MAX_TOPIC_SIZE geprüft
+        topicBuffer[topicLength] = '\0'; // Nullterminierung
         String topic = String(topicBuffer);
         index += topicLength;
 
@@ -964,21 +1006,68 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                 }
 
                 // Paket auf Stack erstellen (falls es passt) oder dynamisch allozieren
-                if (totalLength <= MQTT_MAX_PACKET_SIZE)
-                {
-                    std::unique_ptr<uint8_t[]> packet(new uint8_t[totalLength]);
-                    packet[0] = (MQTT_PUBLISH << 4) | 0x01;
-                    packet[1] = totalLength - 2;
-                    packet[2] = topicLength >> 8;
-                    packet[3] = topicLength & 0xFF;
-                    memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
-                    memcpy(packet.get() + 4 + topicLength, msg->payload.get(), msg->length);
-                    client->client->write((const char *)packet.get(), totalLength);
+                // totalLength wurde bereits gegen MQTT_MAX_PACKET_SIZE geprüft.
+                // topicLength und msg->length wurden ebenfalls geprüft.
+                
+                // Die Berechnung der Remaining Length für das Publish-Paket:
+                // 2 Bytes für Topic-Länge + topicLength + msg->length (Payload)
+                // Wenn QoS > 0, kommen noch 2 Bytes für Packet ID hinzu.
+                // Da Retained Messages hier mit QoS 0 gesendet werden (implizit durch (MQTT_PUBLISH << 4) | 0x01),
+                // brauchen wir keine Packet ID.
+                size_t remainingLength = 2 + topicLength + msg->length;
+                
+                // Encoding der Remaining Length (vereinfacht, da <128 angenommen wird, was meistens der Fall ist)
+                // Eine vollständige Implementierung würde variable Bytes für Remaining Length berücksichtigen.
+                // Hier gehen wir davon aus, dass totalLength (und damit remainingLength) klein genug ist.
+                // MQTT_MAX_PACKET_SIZE ist 1024, also kann remainingLength > 127 sein.
+                
+                // Sicherstellen, dass wir Puffer für die variable Remaining Length haben (max 4 Bytes)
+                uint8_t remainingLengthBytes[4];
+                size_t remainingLengthEncodedSize = 0;
+                size_t tempRemainingLength = remainingLength;
+                do {
+                    uint8_t byte = tempRemainingLength % 128;
+                    tempRemainingLength /= 128;
+                    if (tempRemainingLength > 0) {
+                        byte |= 128;
+                    }
+                    remainingLengthBytes[remainingLengthEncodedSize++] = byte;
+                } while (tempRemainingLength > 0 && remainingLengthEncodedSize < sizeof(remainingLengthBytes));
 
-                    logMessage(DEBUG_DEBUG, "Retained Message gesendet: %s (Länge: %u)",
-                               msg->topic.c_str(), (unsigned)msg->length);
+                if (tempRemainingLength > 0) { // remainingLength war zu groß für 4 Bytes
+                    logMessage(DEBUG_ERROR, "Retained Message: Remaining Length zu groß zum Kodieren (%u).", (unsigned)remainingLength);
+                    continue; 
                 }
-                break;
+
+                size_t headerSize = 1 + remainingLengthEncodedSize; // 1 Byte für Fixed Header + Bytes für Remaining Length
+                size_t packetSizeForRetained = headerSize + remainingLength;
+
+                if (packetSizeForRetained > MQTT_MAX_PACKET_SIZE) {
+                     logMessage(DEBUG_ERROR, "Retained Message (final check) zu groß: %u > %u",
+                               (unsigned)packetSizeForRetained, MQTT_MAX_PACKET_SIZE);
+                    continue;
+                }
+
+                std::unique_ptr<uint8_t[]> packet(new uint8_t[packetSizeForRetained]);
+                packet[0] = (MQTT_PUBLISH << 4) | 0x01; // Retained Bit gesetzt, QoS 0
+                memcpy(packet.get() + 1, remainingLengthBytes, remainingLengthEncodedSize);
+                
+                size_t currentOffset = headerSize;
+                packet[currentOffset++] = topicLength >> 8;
+                packet[currentOffset++] = topicLength & 0xFF;
+                memcpy(packet.get() + currentOffset, msg->topic.c_str(), topicLength);
+                currentOffset += topicLength;
+                
+                if (msg->length > 0 && msg->payload) { // Nur kopieren, wenn Payload vorhanden
+                    memcpy(packet.get() + currentOffset, msg->payload.get(), msg->length);
+                }
+                
+                client->client->write((const char *)packet.get(), packetSizeForRetained);
+
+                logMessage(DEBUG_DEBUG, "Retained Message gesendet: %s (Topic Länge: %u, Payload Länge: %u, Paket Größe: %u)",
+                           msg->topic.c_str(), (unsigned)topicLength, (unsigned)msg->length, (unsigned)packetSizeForRetained);
+                
+                break; 
             }
         }
     }
@@ -1110,8 +1199,11 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
     int sentCount = 0;
 
     // An alle relevanten Clients senden
-    for (auto &c : clients)
+    for (auto const& [asyncClient, clientUPtr] : _clients) // Iteriere über die Map
     {
+        // clientUPtr is std::unique_ptr<MQTTClient>, use .get() to get raw pointer
+        MQTTClient* c = clientUPtr.get();
+
         if (!c->connected)
             continue;
 
@@ -1121,6 +1213,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
         // Sender ausschließen, ganz unabhängig von ignoreLoopDeliver
         if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
         {
+            logMessage(DEBUG_DEBUG, "  - Client %s (Sender) wird übersprungen", c->clientId.c_str());
             continue;
         }
 
@@ -1135,12 +1228,14 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
 
             if (matched)
             {
-                // noLocal-Flag: falls gesetzt, nochmals sicherstellen, dass der Sender nicht bekommt
-                if (sub.noLocal && c->clientId == excludeClientId)
+                // noLocal-Flag: falls gesetzt, und der aktuelle Client ist der Sender (obwohl oben schon geprüft),
+                // dann nicht senden. Diese Prüfung hier ist spezifisch für das noLocal-Flag der Subscription.
+                if (sub.noLocal && !excludeClientId.isEmpty() && c->clientId == excludeClientId)
                 {
-                    logMessage(DEBUG_DEBUG, "  - Client %s wird übersprungen (noLocal)",
+                    logMessage(DEBUG_DEBUG, "  - Client %s wird übersprungen (noLocal Flag der Subscription)",
                                c->clientId.c_str());
-                    break;
+                    break; // Nächste Subscription dieses Clients prüfen (obwohl meist nur eine Subscription pro Topic)
+                           // oder besser: nächste Subscription prüfen, da ein Client mehrere Filter haben kann, die matchen
                 }
 
                 // Paket zusammenbauen

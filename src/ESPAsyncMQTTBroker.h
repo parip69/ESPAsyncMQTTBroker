@@ -82,6 +82,7 @@ enum DebugLevel
 };
 
 // Logger-Funktion, die verschiedene Log-Levels unterstützt
+/** @brief Makro für vereinfachten Zugriff auf die logMessage Funktion. */
 #define MQTT_LOG(level, format, ...) logMessage(level, format, ##__VA_ARGS__)
 
 /**
@@ -126,17 +127,23 @@ struct RetainedMessage
      * @param len Länge des Payloads
      * @param q QoS-Level
      */    RetainedMessage(const String& t, const uint8_t* p, size_t len, uint8_t q) 
-        : topic(t), length(len), qos(q) {
+        : topic(t), qos(q) {
         // Sichere Kopie des Payloads
         if (len > 0 && p != nullptr) {
-            // Anstelle von std::make_unique nutzen wir direkt den Konstruktor
-            payload.reset(new uint8_t[len]);
             if (len <= MQTT_MAX_PAYLOAD_SIZE) {
-                memcpy(payload.get(), p, len);
+                this->length = len;
+                payload.reset(new uint8_t[this->length]);
+                memcpy(payload.get(), p, this->length);
             } else {
-                memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
-                length = MQTT_MAX_PAYLOAD_SIZE;
+                this->length = MQTT_MAX_PAYLOAD_SIZE;
+                payload.reset(new uint8_t[this->length]);
+                memcpy(payload.get(), p, this->length);
+                // Log Message for truncation can be added here if logging is available
+                // For now, we assume the main logger of the broker handles this or it's a silent truncation.
             }
+        } else {
+            this->length = 0;
+            // payload bleibt nullptr oder leer, was in Ordnung ist.
         }
     }
 };
@@ -152,12 +159,47 @@ struct ESPAsyncMQTTBrokerConfig
 };
 
 // Callback-Typdefinitionen für Ereignisbehandlung
+/** @brief Callback-Typ für Client-Verbindungsereignisse. Wird ausgelöst, wenn ein Client erfolgreich verbindet.
+ *  @param clientId Die ID des verbundenen Clients.
+ *  @param clientIp Die IP-Adresse des verbundenen Clients.
+ */
 typedef std::function<void(String clientId, String clientIp)> ClientCallback;
+
+/** @brief Callback-Typ für eingehende Nachrichten. Wird ausgelöst, wenn eine Nachricht von einem Client empfangen wird.
+ *  @param clientId Die ID des sendenden Clients.
+ *  @param topic Das Topic, auf dem die Nachricht empfangen wurde.
+ *  @param message Der Inhalt der empfangenen Nachricht.
+ */
 typedef std::function<void(String clientId, String topic, String message)> MessageCallback;
+
+/** @brief Callback-Typ für Client-Trennungsereignisse. Wird ausgelöst, wenn ein Client die Verbindung trennt.
+ *  @param clientId Die ID des getrennten Clients.
+ */
 typedef std::function<void(String clientId)> ClientDisconnectCallback;
+
+/** @brief Callback-Typ für Fehlerereignisse. Wird bei clientbezogenen Fehlern ausgelöst.
+ *  @param clientId Die ID des Clients, bei dem der Fehler auftrat (kann leer sein).
+ *  @param errorCode Der Fehlercode.
+ *  @param errorMessage Eine beschreibende Fehlermeldung.
+ */
 typedef std::function<void(String clientId, int errorCode, const String &errorMessage)> ErrorCallback;
+
+/** @brief Callback-Typ für neue Abonnements. Wird ausgelöst, wenn ein Client ein Topic abonniert.
+ *  @param clientId Die ID des abonnierenden Clients.
+ *  @param topic Das Topic (oder der Filter), das abonniert wurde.
+ */
 typedef std::function<void(String clientId, const String &topic)> SubscribeCallback;
+
+/** @brief Callback-Typ für das Beenden von Abonnements. Wird ausgelöst, wenn ein Client ein Abonnement entfernt.
+ *  @param clientId Die ID des Clients.
+ *  @param topic Das Topic (oder der Filter), dessen Abonnement beendet wurde.
+ */
 typedef std::function<void(String clientId, const String &topic)> UnsubscribeCallback;
+
+/** @brief Callback-Typ für Log-Nachrichten des Brokers.
+ *  @param level Das Debug-Level der Nachricht.
+ *  @param message Die Log-Nachricht.
+ */
 typedef std::function<void(DebugLevel level, const String &message)> LoggingCallback;
 
 /**
@@ -313,29 +355,45 @@ public:
     std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
 
 private:
-    std::unique_ptr<AsyncServer> server;
-    uint16_t port;
-    std::vector<std::unique_ptr<MQTTClient>> clients;
-    std::vector<std::unique_ptr<RetainedMessage>> retainedMessages;
+    std::unique_ptr<AsyncServer> server; ///< Smart Pointer zum AsyncTCP Serverobjekt.
+    uint16_t port;                       ///< Der TCP-Port, auf dem der Broker lauscht.
+    
+    /** 
+     * @brief Map der aktuell verbundenen Clients.
+     * Der Schlüssel ist der `AsyncClient*` (Zeiger auf die TCP-Verbindung), 
+     * der Wert ist ein `unique_ptr` zum `MQTTClient`-Objekt, das die Zustandsinformationen des Clients hält.
+     */
+    std::map<AsyncClient*, std::unique_ptr<MQTTClient>> _clients; 
+    
+    std::vector<std::unique_ptr<RetainedMessage>> retainedMessages; ///< Liste der gespeicherten (retained) Nachrichten.
+    
+    /**
+     * @brief Map der persistenten Client-Sessions.
+     * Wird verwendet, wenn Clients mit `cleanSession = false` verbinden.
+     * Der Schlüssel ist die `clientId` des Clients.
+     */
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
-    ESPAsyncMQTTBrokerConfig brokerConfig;
+    
+    ESPAsyncMQTTBrokerConfig brokerConfig; ///< Aktuelle Konfiguration des Brokers (z.B. Authentifizierung).
 
-    // Behalte die Client-Info-Map, entferne die Message-History
-    std::map<String, String> connectedClientsInfo; // Client-ID -> IP
+    /** 
+     * @brief Map zur Speicherung von Informationen über verbundene Clients (Client-ID -> IP-Adresse).
+     * Wird für die `getConnectedClientsInfo()` Methode verwendet.
+     */
+    std::map<String, String> connectedClientsInfo; 
 
-    // Asynchroner Timer für Keep-Alive-Timeouts
-    esp_timer_handle_t timeoutTimer = NULL;
+    esp_timer_handle_t timeoutTimer = NULL; ///< Handle für den ESP-Timer, der für Keep-Alive-Timeouts verwendet wird.
 
-    // Callbacks
-    ClientCallback clientConnectCallback = nullptr;
-    MessageCallback messageCallback = nullptr;
-    ClientDisconnectCallback clientDisconnectCallback = nullptr;
-    ErrorCallback errorCallback = nullptr;
-    SubscribeCallback subscribeCallback = nullptr;
-    UnsubscribeCallback unsubscribeCallback = nullptr;
-    LoggingCallback loggingCallback = nullptr;
+    // Callbacks für verschiedene Broker-Ereignisse
+    ClientCallback clientConnectCallback = nullptr;         ///< Callback für neue Client-Verbindungen.
+    MessageCallback messageCallback = nullptr;              ///< Callback für eingehende Nachrichten.
+    ClientDisconnectCallback clientDisconnectCallback = nullptr; ///< Callback für Client-Trennungen.
+    ErrorCallback errorCallback = nullptr;                  ///< Callback für Fehlerereignisse.
+    SubscribeCallback subscribeCallback = nullptr;          ///< Callback für neue Abonnements.
+    UnsubscribeCallback unsubscribeCallback = nullptr;      ///< Callback für das Beenden von Abonnements.
+    LoggingCallback loggingCallback = nullptr;              ///< Callback für Log-Nachrichten.
 
-    DebugLevel debugLevel = DEBUG_DEBUG;
+    DebugLevel debugLevel = DEBUG_DEBUG; ///< Aktuelles Debug-Level für die Logging-Ausgabe.
 
     /**
      * @brief Verarbeitet ein CONNECT-Paket
