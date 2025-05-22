@@ -7,6 +7,8 @@
 #include <vector>
 #include <map>
 #include <functional>
+#include <memory>
+#include <cstdarg> // Required for va_list, etc.
 #include "esp_timer.h" // Für asynchrone Timer
 
 // MQTT Pakettypen
@@ -69,7 +71,7 @@ struct MQTTClient
 struct RetainedMessage
 {
     String topic;
-    uint8_t *payload;
+    std::unique_ptr<uint8_t[]> payload; // Changed to unique_ptr for automatic memory management
     size_t length;
     uint8_t qos;
 };
@@ -120,9 +122,9 @@ public:
 private:
     AsyncServer *server;
     uint16_t port;
-    std::vector<MQTTClient *> clients;
-    std::vector<RetainedMessage *> retainedMessages;
-    std::map<String, MQTTClient *> persistentSessions;
+    std::vector<std::unique_ptr<MQTTClient>> clients;
+    std::vector<std::unique_ptr<RetainedMessage>> retainedMessages; // Changed to vector of unique_ptr
+    std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
     ESPAsyncMQTTBrokerConfig brokerConfig;
 
     // Behalte die Client-Info-Map, entferne die Message-History
@@ -161,6 +163,10 @@ private:
     bool authenticateClient(const String &username, const String &password);
     void onClient(AsyncClient *client);
     void checkTimeouts();
+
+    // Private logging helpers
+    void _log(DebugLevel level, const char* format, ...);
+    void _logln(DebugLevel level, const char* format, ...);
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
