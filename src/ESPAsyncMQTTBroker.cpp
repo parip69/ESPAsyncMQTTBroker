@@ -1,4 +1,4 @@
-// @version: 1.5.0 Builddatum 21-05.2025
+// @version: 1.5.0 Builddatum 22-05.2025 Parip69
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
 
@@ -135,7 +135,8 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
 }
 
 void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
-{    auto mqttClient = std::unique_ptr<MQTTClient>(new MQTTClient());
+{
+    auto mqttClient = std::unique_ptr<MQTTClient>(new MQTTClient());
     mqttClient->client = client;
     mqttClient->connected = false;
     mqttClient->lastActivity = millis();
@@ -414,7 +415,8 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     offset += 2;
 
     // Prüfung auf leere ClientID in Kombination mit cleanSession=false
-    if (clientIdLength == 0 && !cleanSession) {
+    if (clientIdLength == 0 && !cleanSession)
+    {
         logMessage(DEBUG_ERROR, "❌ Client-Verbindung abgelehnt: Leere ClientID ist nicht erlaubt für cleanSession=false.");
         uint8_t connack_rejected[] = {0x20, 0x02, 0x00, 0x02}; // Identifier rejected, Session Present = 0
         client->client->write((const char *)connack_rejected, sizeof(connack_rejected));
@@ -445,14 +447,14 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     offset += clientIdLength;
 
     // Persistente Session wiederherstellen
-    bool sessionActuallyRestored = false; 
+    bool sessionActuallyRestored = false;
     auto sessionIt = persistentSessions.find(clientId);
     if (!cleanSession && sessionIt != persistentSessions.end())
     {
         logMessage(DEBUG_INFO, "♻️ Wiederverwende persistente Session für Client: %s", clientId.c_str());
         client->subscriptions = sessionIt->second->subscriptions;
         persistentSessions.erase(sessionIt);
-        sessionActuallyRestored = true; 
+        sessionActuallyRestored = true;
     }
 
     client->cleanSession = cleanSession;
@@ -464,76 +466,88 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     // Will-Information verarbeiten, wenn vorhanden
     // Offset zeigt jetzt auf den Beginn der Will-Properties, falls willFlag gesetzt ist.
-    if (willFlag) {
+    if (willFlag)
+    {
         client->hasWill = true;
         client->willQos = (connectFlags & 0x18) >> 3;
         client->willRetain = (connectFlags & 0x20) != 0;
 
         // Parse Will Topic
-        if (offset + 2 > length) {
+        if (offset + 2 > length)
+        {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Topic-Länge!");
             client->client->close(); // Protokollverstoß, Verbindung schließen
             return;
         }
         uint16_t willTopicLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + willTopicLen > length) {
+        if (offset + willTopicLen > length)
+        {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Topic!");
             client->client->close(); // Protokollverstoß
             return;
         }
-        if (willTopicLen > MQTT_MAX_TOPIC_SIZE) {
+        if (willTopicLen > MQTT_MAX_TOPIC_SIZE)
+        {
             logMessage(DEBUG_ERROR, "Will-Topic zu lang (%u > %u)! Schließe Verbindung.", willTopicLen, MQTT_MAX_TOPIC_SIZE);
             client->client->close(); // Protokollverstoß
             return;
         }
         // Validiere Will-Topic Namen (darf keine Wildcards enthalten)
-        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0}; 
+        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
         memcpy(willTopicBuffer, data + offset, willTopicLen);
-        client->willTopic = String(willTopicBuffer); 
-        
-        if (!isValidPublishTopic(client->willTopic)) { // isValidPublishTopic prüft auf Wildcards
-             logMessage(DEBUG_ERROR, "❌ Ungültiger Will-Topic Name: '%s' (enthält Wildcards). Schließe Verbindung.", client->willTopic.c_str());
-             client->client->close(); // Protokollverstoß
-             return;
+        client->willTopic = String(willTopicBuffer);
+
+        if (!isValidPublishTopic(client->willTopic))
+        { // isValidPublishTopic prüft auf Wildcards
+            logMessage(DEBUG_ERROR, "❌ Ungültiger Will-Topic Name: '%s' (enthält Wildcards). Schließe Verbindung.", client->willTopic.c_str());
+            client->client->close(); // Protokollverstoß
+            return;
         }
         offset += willTopicLen;
 
         // Parse Will Payload
-        if (offset + 2 > length) {
+        if (offset + 2 > length)
+        {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Payload-Länge!");
             client->client->close(); // Protokollverstoß
             return;
         }
         uint16_t willPayloadActualLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + willPayloadActualLen > length) {
+        if (offset + willPayloadActualLen > length)
+        {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Payload!");
             client->client->close(); // Protokollverstoß
             return;
         }
-        
-        client->willPayloadLen = willPayloadActualLen; 
+
+        client->willPayloadLen = willPayloadActualLen;
         size_t lenToCopy = willPayloadActualLen;
 
-        if (willPayloadActualLen > MQTT_MAX_PAYLOAD_SIZE) {
+        if (willPayloadActualLen > MQTT_MAX_PAYLOAD_SIZE)
+        {
             logMessage(DEBUG_WARNING, "Will-Payload wird auf %u gekürzt (von %u)", MQTT_MAX_PAYLOAD_SIZE, willPayloadActualLen);
             lenToCopy = MQTT_MAX_PAYLOAD_SIZE;
-            client->willPayloadLen = MQTT_MAX_PAYLOAD_SIZE; 
+            client->willPayloadLen = MQTT_MAX_PAYLOAD_SIZE;
         }
-        
-        if (lenToCopy > 0) {
+
+        if (lenToCopy > 0)
+        {
             client->willPayload = std::unique_ptr<uint8_t[]>(new uint8_t[lenToCopy]);
             memcpy(client->willPayload.get(), data + offset, lenToCopy);
-        } else {
-            client->willPayload = nullptr; 
+        }
+        else
+        {
+            client->willPayload = nullptr;
         }
         offset += willPayloadActualLen; // Offset um die *originale* Länge erhöhen
 
         logMessage(DEBUG_DEBUG, "LWT registriert: Topic='%s', QoS=%d, Retain=%s, PayloadLen=%u",
                    client->willTopic.c_str(), client->willQos, client->willRetain ? "Ja" : "Nein", client->willPayloadLen);
-
-    } else {
+    }
+    else
+    {
         client->hasWill = false; // Stellt sicher, dass der Default-Wert gesetzt ist.
     }
 
@@ -667,10 +681,12 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
     String topic = String(topicBuffer);
 
     // Validiere den Topic-Namen
-    if (!isValidPublishTopic(topic)) {
+    if (!isValidPublishTopic(topic))
+    {
         logMessage(DEBUG_ERROR, "❌ Ungültiger Topic-Name '%s' von Client '%s' empfangen. Schließe Verbindung.",
                    topic.c_str(), client->clientId.c_str());
-        if (client->client) { // Zusätzliche Sicherheitsprüfung
+        if (client->client)
+        {                            // Zusätzliche Sicherheitsprüfung
             client->client->close(); // Schließe die Verbindung wegen Protokollverstoß
         }
         return; // Verwirf die Nachricht und führe keine weiteren Aktionen aus
@@ -700,7 +716,8 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         {
             // QoS 2: Store message, send PUBREC
             uint32_t payloadLength = length - payloadOffset;
-            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE) {
+            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
+            {
                 logMessage(DEBUG_WARNING, "QoS 2 Payload wird auf %u gekürzt (von %u)",
                            MQTT_MAX_PAYLOAD_SIZE, payloadLength);
                 payloadLength = MQTT_MAX_PAYLOAD_SIZE;
@@ -713,7 +730,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
             logMessage(DEBUG_INFO, "🔔 QoS 2 Publish empfangen – Topic='%s', PacketID=%u. Sende PUBREC.",
                        topic.c_str(), packetId);
-            
+
             uint8_t pubrec[] = {
                 (MQTT_PUBREC << 4), 0x02,
                 (uint8_t)(packetId >> 8),
@@ -725,7 +742,8 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
     // Nur für QoS 0 (und QoS 1, der oben bereits behandelt wurde, aber hier nicht mehr hinkommt)
     // QoS 2 wird oben explizit behandelt und kehrt zurück.
-    if (qos == 0) {
+    if (qos == 0)
+    {
         uint32_t payloadLength = length - payloadOffset;
         if (payloadLength > 0)
         {
@@ -753,12 +771,15 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
             // Verwende die erweiterte publish-Methode mit noLocal-Unterstützung
             // Die Nachricht weiterleiten, aber den absendenden Client ausschließen
             publish(topic.c_str(), payloadStr.c_str(), retained, qos, client->clientId);
-        } else if (retained) { // QoS 0, leere Payload, aber retained
-             logMessage(DEBUG_INFO, "🔔 Publish (QoS 0, leere Retained) – Topic='%s'", topic.c_str());
-             if (messageCallback) {
+        }
+        else if (retained)
+        { // QoS 0, leere Payload, aber retained
+            logMessage(DEBUG_INFO, "🔔 Publish (QoS 0, leere Retained) – Topic='%s'", topic.c_str());
+            if (messageCallback)
+            {
                 messageCallback(client->clientId, topic, "");
-             }
-             publish(topic.c_str(), "", retained, qos, client->clientId);
+            }
+            publish(topic.c_str(), "", retained, qos, client->clientId);
         }
     }
 }
@@ -810,7 +831,8 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
                    topicBuffer, requestedQoS, noLocal ? "true" : "false");
 
         // Neue Subscription-Struktur verwenden
-        if (isValidTopicFilter(topic)) {
+        if (isValidTopicFilter(topic))
+        {
             Subscription sub;
             sub.filter = topic;
             sub.noLocal = noLocal; // noLocal wird aus dem options-Byte gelesen
@@ -823,13 +845,18 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
             {
                 subscribeCallback(client->clientId, topic);
             }
-        } else {
+        }
+        else
+        {
             // Ungültiger Topic-Filter
             logMessage(DEBUG_WARNING, "❌ Subscription für Client '%s' zu ungültigem Topic-Filter '%s' abgelehnt.",
                        client->clientId.c_str(), topic.c_str());
-            if (client->protocolVersion == MQTT_PROTOCOL_LEVEL_5) {
+            if (client->protocolVersion == MQTT_PROTOCOL_LEVEL_5)
+            {
                 returnCodes.push_back(0x8F); // Topic Filter invalid (MQTT 5.0)
-            } else {
+            }
+            else
+            {
                 returnCodes.push_back(0x80); // Failure (MQTT 3.1.1)
             }
             // Kein Aufruf des subscribeCallback für ungültige Filter
@@ -843,7 +870,7 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
     {
         logMessage(DEBUG_ERROR, "Keine gültigen Subscriptions im SUBSCRIBE-Paket");
         return;
-    }    // SUBACK-Paket erstellen
+    } // SUBACK-Paket erstellen
     size_t subackLength = 2 + returnCodes.size();
     std::unique_ptr<uint8_t[]> suback(new uint8_t[2 + subackLength]);
 
@@ -939,10 +966,11 @@ void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
     client->gracefulDisconnect = true; // Markiere als saubere Trennung
 
     // Verwerfe LWT, da es ein sauberes DISCONNECT ist
-    if (client->hasWill) {
+    if (client->hasWill)
+    {
         logMessage(DEBUG_DEBUG, "LWT für Client %s wird verworfen (saubere Trennung).", client->clientId.c_str());
         client->hasWill = false;
-        client->willTopic = ""; // Topic String leeren
+        client->willTopic = "";      // Topic String leeren
         client->willPayload.reset(); // unique_ptr zurücksetzen, gibt Speicher frei
         client->willPayloadLen = 0;
         // willQos und willRetain müssen nicht explizit zurückgesetzt werden, da hasWill=false sie irrelevant macht.
@@ -991,7 +1019,8 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
         // Die publish Methode erwartet einen const char* der NUL-terminiert ist.
         // Unsere gespeicherte Payload ist das nicht notwendigerweise.
         String payloadStr;
-        if (msg.payload_len > 0 && msg.payload) {
+        if (msg.payload_len > 0 && msg.payload)
+        {
             // Erstelle einen String, der auch NUL-Bytes im Payload handhaben kann, falls nötig,
             // aber für die meisten MQTT-Textnachrichten ist eine NUL-Terminierung für C-Strings wichtig.
             // Hier erstellen wir einen Puffer, der sicher NUL-terminiert ist.
@@ -999,7 +1028,9 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
             memcpy(tempPayload, msg.payload.get(), msg.payload_len);
             tempPayload[msg.payload_len] = '\0';
             payloadStr = String(tempPayload);
-        } else {
+        }
+        else
+        {
             payloadStr = ""; // Leerer Payload
         }
 
@@ -1009,7 +1040,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
         // Veröffentliche die Nachricht an die Abonnenten
         // QoS wird als 2 beibehalten (obwohl publish() intern dies evtl. für Subscriber anpasst)
         // originalClientId wird als excludeClientId für noLocal Logik verwendet
-        publish(msg.topic.c_s(), payloadStr.c_s(), msg.retained, MQTT_QOS2, msg.originalClientId);
+        publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2, msg.originalClientId);
 
         // Entferne die Nachricht aus der Map
         incomingQoS2Messages.erase(it);
@@ -1104,22 +1135,23 @@ bool ESPAsyncMQTTBroker::topicMatches(const String &subscription, const String &
 void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 {
     // Iteriere über die std::map. 'entry' ist ein std::pair<const String, std::unique_ptr<RetainedMessage>>&
-    for (auto const& entry : retainedMessages) 
+    for (auto const &entry : retainedMessages)
     {
         // auto const& topic_key = entry.first; // Das Topic aus dem Map-Key (nicht direkt verwendet, msg->topic ist Quelle der Wahrheit)
-        auto const& msg = entry.second; // Der std::unique_ptr<RetainedMessage>
+        auto const &msg = entry.second; // Der std::unique_ptr<RetainedMessage>
 
         // Stelle sicher, dass msg gültig ist (sollte es immer sein in der Map, da wir nur per std::move einfügen)
-        if (!msg) {
+        if (!msg)
+        {
             logMessage(DEBUG_ERROR, "Fehler: Ungültiger unique_ptr in retainedMessages Map gefunden.");
             continue;
         }
 
         for (auto &sub : client->subscriptions)
         {
-            // Verwende msg->topic (das im RetainedMessage Objekt gespeicherte Topic) 
+            // Verwende msg->topic (das im RetainedMessage Objekt gespeicherte Topic)
             // für topicMatches und beim Paketbau.
-            if (topicMatches(sub, msg->topic)) 
+            if (topicMatches(sub, msg->topic))
             {
                 size_t topicLength = msg->topic.length();
 
@@ -1133,25 +1165,26 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 
                 // Payload-Länge bestimmen und ggf. kürzen für die Berechnung der totalLength
                 size_t actualPayloadLength = msg->length;
-                if (msg->length > MQTT_MAX_PAYLOAD_SIZE) {
-                     logMessage(DEBUG_WARNING, "Retained Payload für Topic '%s' wird gekürzt: %u > %u",
+                if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
+                {
+                    logMessage(DEBUG_WARNING, "Retained Payload für Topic '%s' wird gekürzt: %u > %u",
                                msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
                     actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
                 }
-                
+
                 // Gesamtlänge berechnen (Fixed Header + TopicLen + PayloadLen)
                 // Die 'Remaining Length' selbst (packet[1]) darf nicht die ersten 2 Bytes des MQTT-Headers enthalten
-                size_t remainingLengthField = 2 + topicLength + actualPayloadLength; 
+                size_t remainingLengthField = 2 + topicLength + actualPayloadLength;
                 size_t totalPacketLength = 1 + 1 + remainingLengthField; // Type + RemainingLengthByte(s) + Payload
 
                 // Prüfung, ob die "Remaining Length" in ein einzelnes Byte passt (wie aktuell implementiert)
                 if (remainingLengthField > 127)
                 {
-                     logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) zu groß für einfache Kodierung der Remaining Length: %u.",
+                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) zu groß für einfache Kodierung der Remaining Length: %u.",
                                msg->topic.c_str(), (unsigned)remainingLengthField);
                     continue; // Zur nächsten Subscription
                 }
-                
+
                 // Prüfung gegen die absolute Paketgröße
                 if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
                 {
@@ -1159,26 +1192,27 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                                msg->topic.c_str(), (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
                     continue; // Zur nächsten Subscription
                 }
-                
+
                 // Paket dynamisch allozieren
                 std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
                 // Verwende msg->qos für das QoS-Level der Retained Message
                 packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01; // Retain Flag ist 1
-                packet[1] = (uint8_t)remainingLengthField; // Remaining Length (nur 1 Byte hier)
+                packet[1] = (uint8_t)remainingLengthField;                // Remaining Length (nur 1 Byte hier)
                 packet[2] = topicLength >> 8;
                 packet[3] = topicLength & 0xFF;
                 memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
-                
+
                 // Verwende msg->payload.get() und die (ggf. gekürzte) actualPayloadLength für den Payload
-                if (actualPayloadLength > 0 && msg->payload) { 
+                if (actualPayloadLength > 0 && msg->payload)
+                {
                     memcpy(packet.get() + 4 + topicLength, msg->payload.get(), actualPayloadLength);
                 }
-                
+
                 client->client->write((const char *)packet.get(), totalPacketLength);
 
                 logMessage(DEBUG_DEBUG, "Retained Message gesendet: Topic='%s', Payload-Länge=%u, QoS=%d",
                            msg->topic.c_str(), (unsigned)actualPayloadLength, msg->qos);
-                
+
                 break; // Wichtig: Nachricht wurde für diese Subscription gesendet.
                        // Gehe zur nächsten Retained Message (äußere Schleife).
             }
@@ -1234,26 +1268,31 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
     return true;
 }
 
-bool ESPAsyncMQTTBroker::isValidPublishTopic(const String& topic) {
-    if (topic.isEmpty()) {
+bool ESPAsyncMQTTBroker::isValidPublishTopic(const String &topic)
+{
+    if (topic.isEmpty())
+    {
         logMessage(DEBUG_WARNING, "❌ Ungültiger Publish-Topic: Topic ist leer.");
         return false;
     }
 
     // Überprüfung der Gesamtlänge (obwohl MQTT_MAX_TOPIC_SIZE dies bereits einschränkt)
     // MQTT_MAX_TOPIC_SIZE ist 256. Die 65535-Grenze ist eher für die absolute MQTT-Spezifikation.
-    if (topic.length() > MQTT_MAX_TOPIC_SIZE) { // Verwende unsere interne, strengere Grenze
+    if (topic.length() > MQTT_MAX_TOPIC_SIZE)
+    { // Verwende unsere interne, strengere Grenze
         logMessage(DEBUG_WARNING, "❌ Ungültiger Publish-Topic: Topic '%s' überschreitet maximale Länge von %d.", topic.c_str(), MQTT_MAX_TOPIC_SIZE);
         return false;
     }
     // Die allgemeine MQTT-Grenze von 65535 ist hier weniger relevant als unsere Konfiguration.
 
     // Prüfe auf Wildcard-Zeichen
-    if (topic.indexOf('#') != -1) {
+    if (topic.indexOf('#') != -1)
+    {
         logMessage(DEBUG_WARNING, "❌ Ungültiger Publish-Topic: Topic '%s' enthält Multi-Level Wildcard '#'.", topic.c_str());
         return false;
     }
-    if (topic.indexOf('+') != -1) {
+    if (topic.indexOf('+') != -1)
+    {
         logMessage(DEBUG_WARNING, "❌ Ungültiger Publish-Topic: Topic '%s' enthält Single-Level Wildcard '+'.", topic.c_str());
         return false;
     }
@@ -1280,7 +1319,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                                  const String &excludeClientId)
 {
     // Parameter-Validierung für C-String Payload
-    if (!topic) 
+    if (!topic)
     {
         logMessage(DEBUG_ERROR, "Null-Zeiger als Topic für C-String Publish");
         return false;
@@ -1289,13 +1328,13 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
     {
         // Erlaube leeren Payload als leeren String anstatt nullptr
         logMessage(DEBUG_DEBUG, "Null-Zeiger als Payload für C-String Publish, behandle als leeren String.");
-        return publish(topic, (const uint8_t*)"", 0, retained, qos, excludeClientId);
+        return publish(topic, (const uint8_t *)"", 0, retained, qos, excludeClientId);
     }
 
     // Rufe die Haupt-Publish-Methode auf, die binären Payload verarbeitet
     // Konvertiere const char* payload zu const uint8_t*
     // strlen wird verwendet, um die Länge des C-Strings zu bestimmen
-    return publish(topic, (const uint8_t*)payload, strlen(payload), retained, qos, excludeClientId);
+    return publish(topic, (const uint8_t *)payload, strlen(payload), retained, qos, excludeClientId);
 }
 
 bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, const char *payload)
@@ -1305,7 +1344,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, 
 }
 
 // Neue interne Haupt-Publish-Methode, die binären Payload und Länge akzeptiert
-bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos, const String& excludeClientId)
+bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId)
 {
     // Parameter-Validierung
     if (!topic) // Payload kann nullptr sein, wenn payloadLen 0 ist
@@ -1313,11 +1352,11 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
         logMessage(DEBUG_ERROR, "Null-Zeiger als Topic für Publish");
         return false;
     }
-    if (payloadLen > 0 && !payload) {
+    if (payloadLen > 0 && !payload)
+    {
         logMessage(DEBUG_ERROR, "Null-Zeiger als Payload bei payloadLen > 0 für Publish");
         return false;
     }
-
 
     size_t topicLen = strlen(topic);
     if (topicLen > MQTT_MAX_TOPIC_SIZE)
@@ -1337,7 +1376,7 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
     }
 
     // INFO-Log (Payload wird hier nicht geloggt, da es binär sein kann)
-    logMessage(DEBUG_INFO, "📤 Broker veröffentlicht auf Topic '%s' (Länge: %u, QoS: %d, Retained: %s)", 
+    logMessage(DEBUG_INFO, "📤 Broker veröffentlicht auf Topic '%s' (Länge: %u, QoS: %d, Retained: %s)",
                topic, (unsigned)payloadLen, qos, retained ? "Ja" : "Nein");
     if (!excludeClientId.isEmpty())
     {
@@ -1349,15 +1388,15 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
     // Retained-Nachrichten verwalten
     if (retained)
     {
-        retainedMessages.erase(topicStr); 
+        retainedMessages.erase(topicStr);
 
         if (payloadLen > 0)
-        {            
+        {
             auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr,
-                                                           payload, // Direkt den uint8_t* verwenden
-                                                           payloadLen,
-                                                           qos));
-            retainedMessages[topicStr] = std::move(msg); 
+                                                                            payload, // Direkt den uint8_t* verwenden
+                                                                            payloadLen,
+                                                                            qos));
+            retainedMessages[topicStr] = std::move(msg);
         }
     }
 
@@ -1390,7 +1429,7 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
                     if (!subCheck.noLocal)
                     {
                         foundNonNoLocalMatch = true;
-                        break; 
+                        break;
                     }
                 }
             }
@@ -1429,11 +1468,12 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
 
                 auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[1 + 1 + remainingLength]);
                 packet[0] = header;
-                packet[1] = remainingLength; 
+                packet[1] = remainingLength;
                 packet[2] = currentTopicLen >> 8;
                 packet[3] = currentTopicLen & 0xFF;
                 memcpy(packet.get() + 4, topicStr.c_str(), currentTopicLen);
-                if (payloadLen > 0) { // Nur kopieren, wenn Payload vorhanden
+                if (payloadLen > 0)
+                { // Nur kopieren, wenn Payload vorhanden
                     memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
                 }
 
@@ -1452,7 +1492,7 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
                 logMessage(DEBUG_DEBUG, "  - Senden %s",
                            writeSuccess ? "erfolgreich" : "fehlgeschlagen");
 
-                break; 
+                break;
             }
         }
 
@@ -1469,14 +1509,17 @@ bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size
     return messageSent;
 }
 
-bool ESPAsyncMQTTBroker::isValidTopicFilter(const String& filter) {
-    if (filter.isEmpty()) {
+bool ESPAsyncMQTTBroker::isValidTopicFilter(const String &filter)
+{
+    if (filter.isEmpty())
+    {
         logMessage(DEBUG_WARNING, "❌ Ungültiger Topic-Filter: Filter ist leer.");
         return false;
     }
 
     // Überprüfung der Gesamtlänge (obwohl MQTT_MAX_TOPIC_SIZE dies bereits einschränkt)
-    if (filter.length() > 65535) { // MQTT specific limit
+    if (filter.length() > 65535)
+    { // MQTT specific limit
         logMessage(DEBUG_WARNING, "❌ Ungültiger Topic-Filter: Filter überschreitet 65535 Bytes.");
         return false;
     }
@@ -1486,46 +1529,59 @@ bool ESPAsyncMQTTBroker::isValidTopicFilter(const String& filter) {
     std::vector<String> levels;
     int start = 0;
     int pos;
-    while ((pos = filter.indexOf('/', start)) != -1) {
+    while ((pos = filter.indexOf('/', start)) != -1)
+    {
         levels.push_back(filter.substring(start, pos));
         start = pos + 1;
     }
     levels.push_back(filter.substring(start));
 
-    if (levels.empty() && !filter.isEmpty()) {
+    if (levels.empty() && !filter.isEmpty())
+    {
         // Sollte nicht passieren, wenn filter nicht leer ist, aber als Sicherheitsnetz
         // z.B. wenn filter nur aus "/" besteht, wird levels ["", ""].
         // Wenn filter "a" ist, wird levels ["a"].
     }
-    
-    if (filter == "/") { // Spezieller Fall, ergibt ["", ""], was gültig ist.
-      // No action needed, valid.
-    } else if (levels.empty() && filter.length() > 0) { // Sollte nicht eintreten, wenn der Splitter korrekt funktioniert
+
+    if (filter == "/")
+    {   // Spezieller Fall, ergibt ["", ""], was gültig ist.
+        // No action needed, valid.
+    }
+    else if (levels.empty() && filter.length() > 0)
+    { // Sollte nicht eintreten, wenn der Splitter korrekt funktioniert
         logMessage(DEBUG_WARNING, "❌ Ungültiger Topic-Filter: Konnte Ebenen nicht zerlegen für nicht-leeren Filter '%s'.", filter.c_str());
         return false;
     }
 
+    for (size_t i = 0; i < levels.size(); ++i)
+    {
+        const String &level = levels[i];
 
-    for (size_t i = 0; i < levels.size(); ++i) {
-        const String& level = levels[i];
-
-        if (level.indexOf('#') != -1) { // Enthält '#'
-            if (level.length() > 1) { // Mehr als nur '#', z.B. "sport#" oder "#abc"
+        if (level.indexOf('#') != -1)
+        { // Enthält '#'
+            if (level.length() > 1)
+            { // Mehr als nur '#', z.B. "sport#" oder "#abc"
                 logMessage(DEBUG_WARNING, "❌ Ungültiger Topic-Filter: '#' darf nicht Teil einer Ebene sein (Ebene: '%s', Filter: '%s').", level.c_str(), filter.c_str());
                 return false;
             }
             // Ebene ist genau "#"
-            if (i != levels.size() - 1) { // '#' ist nicht die letzte Ebene
+            if (i != levels.size() - 1)
+            { // '#' ist nicht die letzte Ebene
                 logMessage(DEBUG_WARNING, "❌ Ungültiger Topic-Filter: '#' muss die letzte Ebene sein (Filter: '%s').", filter.c_str());
                 return false;
             }
-        } else if (level.indexOf('+') != -1) { // Enthält '+'
-            if (level.length() > 1) { // Mehr als nur '+', z.B. "sport+" oder "+abc"
+        }
+        else if (level.indexOf('+') != -1)
+        { // Enthält '+'
+            if (level.length() > 1)
+            { // Mehr als nur '+', z.B. "sport+" oder "+abc"
                 logMessage(DEBUG_WARNING, "❌ Ungültiger Topic-Filter: '+' darf nicht Teil einer Ebene sein (Ebene: '%s', Filter: '%s').", level.c_str(), filter.c_str());
                 return false;
             }
             // Ebene ist genau "+", was gültig ist.
-        } else {
+        }
+        else
+        {
             // Normale Ebene, darf keine Wildcards enthalten (bereits durch obige Checks abgedeckt)
             // und darf nicht leer sein, es sei denn, es ist die erste oder letzte Ebene eines Filters wie "/foo" oder "foo/"
             // Beispiel: "/finance" -> levels ["", "finance"] -> level[0] ist "" -> gültig
