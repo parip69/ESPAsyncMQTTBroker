@@ -340,7 +340,7 @@ private:
     std::unique_ptr<AsyncServer> server;
     uint16_t port;
     std::vector<std::unique_ptr<MQTTClient>> clients;
-    std::vector<std::unique_ptr<RetainedMessage>> retainedMessages;
+    std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages; // Geändert von std::vector zu std::map
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
     ESPAsyncMQTTBrokerConfig brokerConfig;
 

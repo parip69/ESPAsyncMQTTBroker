@@ -1051,47 +1051,84 @@ bool ESPAsyncMQTTBroker::topicMatches(const String &subscription, const String &
 
 void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 {
-    for (auto &msg : retainedMessages)
+    // Iteriere über die std::map. 'entry' ist ein std::pair<const String, std::unique_ptr<RetainedMessage>>&
+    for (auto const& entry : retainedMessages) 
     {
+        // auto const& topic_key = entry.first; // Das Topic aus dem Map-Key (nicht direkt verwendet, msg->topic ist Quelle der Wahrheit)
+        auto const& msg = entry.second; // Der std::unique_ptr<RetainedMessage>
+
+        // Stelle sicher, dass msg gültig ist (sollte es immer sein in der Map, da wir nur per std::move einfügen)
+        if (!msg) {
+            logMessage(DEBUG_ERROR, "Fehler: Ungültiger unique_ptr in retainedMessages Map gefunden.");
+            continue;
+        }
+
         for (auto &sub : client->subscriptions)
         {
-            if (topicMatches(sub, msg->topic))
+            // Verwende msg->topic (das im RetainedMessage Objekt gespeicherte Topic) 
+            // für topicMatches und beim Paketbau.
+            if (topicMatches(sub, msg->topic)) 
             {
                 size_t topicLength = msg->topic.length();
 
-                // Überprüfe Größe
+                // Überprüfe Topic-Größe
                 if (topicLength > MQTT_MAX_TOPIC_SIZE)
                 {
                     logMessage(DEBUG_ERROR, "Retained Topic zu lang: %u > %u",
                                (unsigned)topicLength, MQTT_MAX_TOPIC_SIZE);
-                    continue;
+                    continue; // Zur nächsten Subscription
                 }
 
-                // Gesamtlänge berechnen und prüfen
-                size_t totalLength = 1 + 1 + 2 + topicLength + msg->length;
-                if (totalLength > MQTT_MAX_PACKET_SIZE)
+                // Payload-Länge bestimmen und ggf. kürzen für die Berechnung der totalLength
+                size_t actualPayloadLength = msg->length;
+                if (msg->length > MQTT_MAX_PAYLOAD_SIZE) {
+                     logMessage(DEBUG_WARNING, "Retained Payload für Topic '%s' wird gekürzt: %u > %u",
+                               msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
+                    actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
+                }
+                
+                // Gesamtlänge berechnen (Fixed Header + TopicLen + PayloadLen)
+                // Die 'Remaining Length' selbst (packet[1]) darf nicht die ersten 2 Bytes des MQTT-Headers enthalten
+                size_t remainingLengthField = 2 + topicLength + actualPayloadLength; 
+                size_t totalPacketLength = 1 + 1 + remainingLengthField; // Type + RemainingLengthByte(s) + Payload
+
+                // Prüfung, ob die "Remaining Length" in ein einzelnes Byte passt (wie aktuell implementiert)
+                if (remainingLengthField > 127)
                 {
-                    logMessage(DEBUG_ERROR, "Retained Message zu groß: %u > %u",
-                               (unsigned)totalLength, MQTT_MAX_PACKET_SIZE);
-                    continue;
+                     logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) zu groß für einfache Kodierung der Remaining Length: %u.",
+                               msg->topic.c_str(), (unsigned)remainingLengthField);
+                    continue; // Zur nächsten Subscription
                 }
-
-                // Paket auf Stack erstellen (falls es passt) oder dynamisch allozieren
-                if (totalLength <= MQTT_MAX_PACKET_SIZE)
+                
+                // Prüfung gegen die absolute Paketgröße
+                if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
                 {
-                    std::unique_ptr<uint8_t[]> packet(new uint8_t[totalLength]);
-                    packet[0] = (MQTT_PUBLISH << 4) | 0x01;
-                    packet[1] = totalLength - 2;
-                    packet[2] = topicLength >> 8;
-                    packet[3] = topicLength & 0xFF;
-                    memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
-                    memcpy(packet.get() + 4 + topicLength, msg->payload.get(), msg->length);
-                    client->client->write((const char *)packet.get(), totalLength);
-
-                    logMessage(DEBUG_DEBUG, "Retained Message gesendet: %s (Länge: %u)",
-                               msg->topic.c_str(), (unsigned)msg->length);
+                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) überschreitet MQTT_MAX_PACKET_SIZE: %u > %u.",
+                               msg->topic.c_str(), (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
+                    continue; // Zur nächsten Subscription
                 }
-                break;
+                
+                // Paket dynamisch allozieren
+                std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
+                // Verwende msg->qos für das QoS-Level der Retained Message
+                packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01; // Retain Flag ist 1
+                packet[1] = (uint8_t)remainingLengthField; // Remaining Length (nur 1 Byte hier)
+                packet[2] = topicLength >> 8;
+                packet[3] = topicLength & 0xFF;
+                memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
+                
+                // Verwende msg->payload.get() und die (ggf. gekürzte) actualPayloadLength für den Payload
+                if (actualPayloadLength > 0 && msg->payload) { 
+                    memcpy(packet.get() + 4 + topicLength, msg->payload.get(), actualPayloadLength);
+                }
+                
+                client->client->write((const char *)packet.get(), totalPacketLength);
+
+                logMessage(DEBUG_DEBUG, "Retained Message gesendet: Topic='%s', Payload-Länge=%u, QoS=%d",
+                           msg->topic.c_str(), (unsigned)actualPayloadLength, msg->qos);
+                
+                break; // Wichtig: Nachricht wurde für diese Subscription gesendet.
+                       // Gehe zur nächsten Retained Message (äußere Schleife).
             }
         }
     }
@@ -1225,26 +1262,22 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
     // Retained-Nachrichten verwalten
     if (retained)
     {
-        // Entferne vorhandene retained-Nachricht mit gleichem Topic
-        for (auto it = retainedMessages.begin(); it != retainedMessages.end();)
-        {
-            if ((*it)->topic == topicStr)
-            {
-                it = retainedMessages.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
+        // Entferne vorhandene retained-Nachricht mit gleichem Topic (falls vorhanden)
+        // Das Topic der Nachricht ist topicStr (eine String-Variable, die bereits das Topic enthält)
+        retainedMessages.erase(topicStr); // .erase() auf einer Map mit Key löscht das Element, falls es existiert.
 
         // Bei nicht-leerem Payload: Neue retained-Nachricht speichern
         if (payloadLen > 0)
-        {            auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr,
+        {            
+            // Der Konstruktor von RetainedMessage braucht das Topic als String.
+            // topicStr ist bereits das korrekte Topic.
+            auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr,
                                                            (const uint8_t *)payload,
                                                            payloadLen,
                                                            qos));
-            retainedMessages.push_back(std::move(msg));
+            // Füge die neue Nachricht in die Map ein. 
+            // Der Key ist topicStr, der Value ist das unique_ptr msg.
+            retainedMessages[topicStr] = std::move(msg); 
         }
     }
 
