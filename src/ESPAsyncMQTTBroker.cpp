@@ -174,27 +174,48 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
         // Mit Smart Pointern umgehen
         for (auto it = broker->clients.begin(); it != broker->clients.end(); ++it) {
             if ((*it)->client == client) {
-                auto& target = *it;
+                auto& target = *it; // unique_ptr<MQTTClient>
+
+                // LWT-Veröffentlichung bei unsauberer Trennung
+                if (target->hasWill && !target->gracefulDisconnect) {
+                    broker->logMessage(DEBUG_INFO, "💥 Unsaubere Trennung von Client %s. Veröffentliche LWT: Topic='%s', QoS=%d, Retain=%s",
+                                       target->clientId.c_str(), target->willTopic.c_str(), target->willQos, target->willRetain ? "Ja" : "Nein");
+                    
+                    // Rufe die (neu erstellte/angepasste) publish-Methode auf, die uint8_t* und Länge akzeptiert.
+                    // Die excludeClientId ist hier leer, da der Broker die Nachricht sendet.
+                    broker->publish(target->willTopic.c_str(), 
+                                    target->willPayload.get(), 
+                                    target->willPayloadLen, 
+                                    target->willRetain, 
+                                    target->willQos, 
+                                    ""); // Kein Client ausschließen basierend auf Sender-ID, da Broker sendet
+
+                    target->hasWill = false; // LWT wurde behandelt (versucht zu senden)
+                    // Speicher für LWT wird durch unique_ptr und String-Destruktor automatisch freigegeben,
+                    // wenn target eventuell später gelöscht wird (cleanSession) oder wenn handleDisconnect bereits LWT geleert hat.
+                    // Hier explizit leeren ist nicht mehr nötig, da hasWill = false reicht.
+                } else if (target->hasWill && target->gracefulDisconnect) {
+                    // Dieser Fall sollte bereits in handleDisconnect behandelt worden sein (hasWill=false gesetzt).
+                    // Aber zur Sicherheit hier nochmal loggen, falls doch was durchrutscht.
+                    broker->logMessage(DEBUG_DEBUG, "LWT für Client %s nicht gesendet (saubere Trennung bereits in handleDisconnect vermerkt).", target->clientId.c_str());
+                }
                 
                 if (!target->cleanSession) {
                     // Persistenter Client: In die persistente Session-Map verschieben
-                    broker->logMessage(DEBUG_INFO, "Client %s getrennt, Session wird beibehalten", 
-                                     target->clientId.c_str());
+                    broker->logMessage(DEBUG_INFO, "Client %s getrennt (graceful: %s), Session wird beibehalten.", 
+                                     target->clientId.c_str(), target->gracefulDisconnect ? "Ja" : "Nein");
                     
-                    // Persistente Session speichern und aus der Client-Liste entfernen
                     broker->persistentSessions[target->clientId] = std::move(target);
                     broker->clients.erase(it);
                 } else {
-                    // Callback aufrufen, falls registriert
+                    // Clean Session: Client entfernen
+                    broker->logMessage(DEBUG_INFO, "Client %s getrennt (graceful: %s), Clean Session, entferne Client.",
+                                     target->clientId.c_str(), target->gracefulDisconnect ? "Ja" : "Nein");
                     if (broker->clientDisconnectCallback) {
                         broker->clientDisconnectCallback(target->clientId);
                     }
-                    
-                    // Client aus der Info-Map entfernen
                     broker->connectedClientsInfo.erase(target->clientId);
-                    
-                    // Aus der Client-Liste entfernen (und automatisch freigeben)
-                    broker->clients.erase(it);
+                    broker->clients.erase(it); // unique_ptr Destruktor gibt MQTTClient frei (inkl. LWT-Daten falls nicht schon in handleDisconnect)
                 }
                 break;
             }
@@ -442,61 +463,78 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     logMessage(DEBUG_DEBUG, "Client-ID: '%s'", clientId.c_str());
 
     // Will-Information verarbeiten, wenn vorhanden
-    if (willFlag)
-    {
-        if (offset + 2 > length)
-        {
+    // Offset zeigt jetzt auf den Beginn der Will-Properties, falls willFlag gesetzt ist.
+    if (willFlag) {
+        client->hasWill = true;
+        client->willQos = (connectFlags & 0x18) >> 3;
+        client->willRetain = (connectFlags & 0x20) != 0;
+
+        // Parse Will Topic
+        if (offset + 2 > length) {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Topic-Länge!");
+            client->client->close(); // Protokollverstoß, Verbindung schließen
             return;
         }
         uint16_t willTopicLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + willTopicLen > length)
-        {
+        if (offset + willTopicLen > length) {
             logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Topic!");
+            client->client->close(); // Protokollverstoß
             return;
         }
-
-        // Will-Topic sicher kopieren
-        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
-        if (willTopicLen < sizeof(willTopicBuffer))
-        {
-            memcpy(willTopicBuffer, data + offset, willTopicLen);
-        }
-        else
-        {
-            logMessage(DEBUG_ERROR, "Will-Topic zu lang!");
+        if (willTopicLen > MQTT_MAX_TOPIC_SIZE) {
+            logMessage(DEBUG_ERROR, "Will-Topic zu lang (%u > %u)! Schließe Verbindung.", willTopicLen, MQTT_MAX_TOPIC_SIZE);
+            client->client->close(); // Protokollverstoß
             return;
+        }
+        // Validiere Will-Topic Namen (darf keine Wildcards enthalten)
+        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0}; 
+        memcpy(willTopicBuffer, data + offset, willTopicLen);
+        client->willTopic = String(willTopicBuffer); 
+        
+        if (!isValidPublishTopic(client->willTopic)) { // isValidPublishTopic prüft auf Wildcards
+             logMessage(DEBUG_ERROR, "❌ Ungültiger Will-Topic Name: '%s' (enthält Wildcards). Schließe Verbindung.", client->willTopic.c_str());
+             client->client->close(); // Protokollverstoß
+             return;
         }
         offset += willTopicLen;
 
-        if (offset + 2 > length)
-        {
-            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Message-Länge!");
+        // Parse Will Payload
+        if (offset + 2 > length) {
+            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Payload-Länge!");
+            client->client->close(); // Protokollverstoß
             return;
         }
-        uint16_t willMsgLen = (data[offset] << 8) | data[offset + 1];
+        uint16_t willPayloadActualLen = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        if (offset + willMsgLen > length)
-        {
-            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Message!");
+        if (offset + willPayloadActualLen > length) {
+            logMessage(DEBUG_ERROR, "❌ Paket zu kurz für Will-Payload!");
+            client->client->close(); // Protokollverstoß
             return;
         }
+        
+        client->willPayloadLen = willPayloadActualLen; 
+        size_t lenToCopy = willPayloadActualLen;
 
-        // Will-Message sicher kopieren
-        char willMsgBuffer[MQTT_MAX_PAYLOAD_SIZE] = {0};
-        if (willMsgLen < sizeof(willMsgBuffer))
-        {
-            memcpy(willMsgBuffer, data + offset, willMsgLen);
+        if (willPayloadActualLen > MQTT_MAX_PAYLOAD_SIZE) {
+            logMessage(DEBUG_WARNING, "Will-Payload wird auf %u gekürzt (von %u)", MQTT_MAX_PAYLOAD_SIZE, willPayloadActualLen);
+            lenToCopy = MQTT_MAX_PAYLOAD_SIZE;
+            client->willPayloadLen = MQTT_MAX_PAYLOAD_SIZE; 
         }
-        else
-        {
-            logMessage(DEBUG_ERROR, "Will-Message zu lang!");
-            return;
+        
+        if (lenToCopy > 0) {
+            client->willPayload = std::unique_ptr<uint8_t[]>(new uint8_t[lenToCopy]);
+            memcpy(client->willPayload.get(), data + offset, lenToCopy);
+        } else {
+            client->willPayload = nullptr; 
         }
-        offset += willMsgLen;
+        offset += willPayloadActualLen; // Offset um die *originale* Länge erhöhen
 
-        logMessage(DEBUG_DEBUG, "Will Topic: '%s', Will Message: '%s'", willTopicBuffer, willMsgBuffer);
+        logMessage(DEBUG_DEBUG, "LWT registriert: Topic='%s', QoS=%d, Retain=%s, PayloadLen=%u",
+                   client->willTopic.c_str(), client->willQos, client->willRetain ? "Ja" : "Nein", client->willPayloadLen);
+
+    } else {
+        client->hasWill = false; // Stellt sicher, dass der Default-Wert gesetzt ist.
     }
 
     // Username & Password verarbeiten, wenn vorhanden
@@ -896,12 +934,26 @@ void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
 
 void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
 {
-    logMessage(DEBUG_INFO, "Ordnungsgemäße Trennung von Client %s", client->clientId.c_str());
+    logMessage(DEBUG_INFO, "Ordnungsgemäße Trennung von Client %s (DISCONNECT Paket empfangen).", client->clientId.c_str());
     client->connected = false;
+    client->gracefulDisconnect = true; // Markiere als saubere Trennung
+
+    // Verwerfe LWT, da es ein sauberes DISCONNECT ist
+    if (client->hasWill) {
+        logMessage(DEBUG_DEBUG, "LWT für Client %s wird verworfen (saubere Trennung).", client->clientId.c_str());
+        client->hasWill = false;
+        client->willTopic = ""; // Topic String leeren
+        client->willPayload.reset(); // unique_ptr zurücksetzen, gibt Speicher frei
+        client->willPayloadLen = 0;
+        // willQos und willRetain müssen nicht explizit zurückgesetzt werden, da hasWill=false sie irrelevant macht.
+    }
+
     if (client->cleanSession && client->client)
     {
-        client->client->close();
+        client->client->close(); // TCP-Verbindung schließen für Clean Session
     }
+    // Für non-clean sessions wird die Verbindung offen gelassen (oder vom Client geschlossen),
+    // der onDisconnect Handler kümmert sich dann um das Verschieben in persistentSessions.
 }
 
 void ESPAsyncMQTTBroker::handlePubRec(MQTTClient *client, uint8_t *data, size_t len)
@@ -1227,12 +1279,45 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                                  uint8_t qos,
                                  const String &excludeClientId)
 {
-    // Parameter-Validierung
-    if (!topic || !payload)
+    // Parameter-Validierung für C-String Payload
+    if (!topic) 
     {
-        logMessage(DEBUG_ERROR, "Null-Zeiger als Topic oder Payload");
+        logMessage(DEBUG_ERROR, "Null-Zeiger als Topic für C-String Publish");
         return false;
     }
+    if (!payload)
+    {
+        // Erlaube leeren Payload als leeren String anstatt nullptr
+        logMessage(DEBUG_DEBUG, "Null-Zeiger als Payload für C-String Publish, behandle als leeren String.");
+        return publish(topic, (const uint8_t*)"", 0, retained, qos, excludeClientId);
+    }
+
+    // Rufe die Haupt-Publish-Methode auf, die binären Payload verarbeitet
+    // Konvertiere const char* payload zu const uint8_t*
+    // strlen wird verwendet, um die Länge des C-Strings zu bestimmen
+    return publish(topic, (const uint8_t*)payload, strlen(payload), retained, qos, excludeClientId);
+}
+
+bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, const char *payload)
+{
+    // Ruft die ursprüngliche publish-Methode mit umgekehrter Reihenfolge der Parameter auf
+    return publish(topic, payload, retained, qos);
+}
+
+// Neue interne Haupt-Publish-Methode, die binären Payload und Länge akzeptiert
+bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos, const String& excludeClientId)
+{
+    // Parameter-Validierung
+    if (!topic) // Payload kann nullptr sein, wenn payloadLen 0 ist
+    {
+        logMessage(DEBUG_ERROR, "Null-Zeiger als Topic für Publish");
+        return false;
+    }
+    if (payloadLen > 0 && !payload) {
+        logMessage(DEBUG_ERROR, "Null-Zeiger als Payload bei payloadLen > 0 für Publish");
+        return false;
+    }
+
 
     size_t topicLen = strlen(topic);
     if (topicLen > MQTT_MAX_TOPIC_SIZE)
@@ -1241,17 +1326,19 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                    (unsigned)topicLen, MQTT_MAX_TOPIC_SIZE);
         return false;
     }
+    // Die Validierung des Topic-Namens selbst (keine Wildcards) sollte bereits vor dem Aufruf dieser internen Methode erfolgt sein,
+    // z.B. in handlePublish oder beim Setzen des Will-Topics. Für Broker-interne Aufrufe (LWT) ist es vertrauenswürdig.
 
-    size_t payloadLen = strlen(payload);
     if (payloadLen > MQTT_MAX_PAYLOAD_SIZE)
     {
         logMessage(DEBUG_WARNING, "Payload wird gekürzt: %u > %u",
                    (unsigned)payloadLen, MQTT_MAX_PAYLOAD_SIZE);
-        payloadLen = MQTT_MAX_PAYLOAD_SIZE;
+        payloadLen = MQTT_MAX_PAYLOAD_SIZE; // Kürze PayloadLen, wenn es das Maximum überschreitet
     }
 
-    // INFO-Log
-    logMessage(DEBUG_INFO, "📤 Broker veröffentlicht auf Topic '%s': %s", topic, payload);
+    // INFO-Log (Payload wird hier nicht geloggt, da es binär sein kann)
+    logMessage(DEBUG_INFO, "📤 Broker veröffentlicht auf Topic '%s' (Länge: %u, QoS: %d, Retained: %s)", 
+               topic, (unsigned)payloadLen, qos, retained ? "Ja" : "Nein");
     if (!excludeClientId.isEmpty())
     {
         logMessage(DEBUG_INFO, "   - Ausgeschlossener Client: %s", excludeClientId.c_str());
@@ -1262,21 +1349,14 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
     // Retained-Nachrichten verwalten
     if (retained)
     {
-        // Entferne vorhandene retained-Nachricht mit gleichem Topic (falls vorhanden)
-        // Das Topic der Nachricht ist topicStr (eine String-Variable, die bereits das Topic enthält)
-        retainedMessages.erase(topicStr); // .erase() auf einer Map mit Key löscht das Element, falls es existiert.
+        retainedMessages.erase(topicStr); 
 
-        // Bei nicht-leerem Payload: Neue retained-Nachricht speichern
         if (payloadLen > 0)
         {            
-            // Der Konstruktor von RetainedMessage braucht das Topic als String.
-            // topicStr ist bereits das korrekte Topic.
             auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr,
-                                                           (const uint8_t *)payload,
+                                                           payload, // Direkt den uint8_t* verwenden
                                                            payloadLen,
                                                            qos));
-            // Füge die neue Nachricht in die Map ein. 
-            // Der Key ist topicStr, der Value ist das unique_ptr msg.
             retainedMessages[topicStr] = std::move(msg); 
         }
     }
@@ -1297,7 +1377,6 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
         clientCount++;
         bool sentToThisClient = false;
 
-        // Vorabprüfung für noLocal, wenn der aktuelle Client 'c' der ursprüngliche Sender ist
         bool isOriginalPublisherAndShouldBeSkipped = false;
         if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
         {
@@ -1311,7 +1390,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                     if (!subCheck.noLocal)
                     {
                         foundNonNoLocalMatch = true;
-                        break; // Sendeberechtigung für diesen Client gefunden
+                        break; 
                     }
                 }
             }
@@ -1325,11 +1404,9 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
 
         if (isOriginalPublisherAndShouldBeSkipped)
         {
-            // Nächsten Client bearbeiten
             continue;
         }
 
-        // Durch alle Subscriptions des Clients iterieren
         for (auto &sub : c->subscriptions)
         {
             logMessage(DEBUG_DEBUG, "🔍 Prüfe Topic-Match für Client %s: Abo='%s', Eingang='%s'",
@@ -1340,29 +1417,25 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
 
             if (matched)
             {
-                // Die noLocal-Logik für den Original-Publisher wurde bereits oben behandelt.
-                // Wenn wir hier sind und c ist der Original-Publisher, bedeutet das,
-                // dass eine passende Subscription mit noLocal=false gefunden wurde.
-
-                // Paket zusammenbauen
-                size_t topicLen = topicStr.length();
-                size_t remainingLength = 2 + topicLen + payloadLen;
+                size_t currentTopicLen = topicStr.length(); // topicLen von oben wiederverwenden
+                size_t remainingLength = 2 + currentTopicLen + payloadLen;
 
                 if (remainingLength > 127)
                 {
-                    logMessage(DEBUG_ERROR, "Nachricht zu groß für einfache Kodierung: %u",
-                               (unsigned)remainingLength);
-                    continue;
+                    logMessage(DEBUG_ERROR, "Nachricht zu groß für einfache Kodierung der Remaining Length: %u. Client: %s, Topic: %s",
+                               (unsigned)remainingLength, c->clientId.c_str(), topicStr.c_str());
+                    continue; // Zum nächsten Abo oder Client springen, anstatt die ganze Publish-Aktion abzubrechen
                 }
 
-                // Paket mit Smart Pointer erstellen
                 auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[1 + 1 + remainingLength]);
                 packet[0] = header;
-                packet[1] = remainingLength; // bleibt < 128 Bytes
-                packet[2] = topicLen >> 8;
-                packet[3] = topicLen & 0xFF;
-                memcpy(packet.get() + 4, topicStr.c_str(), topicLen);
-                memcpy(packet.get() + 4 + topicLen, payload, payloadLen);
+                packet[1] = remainingLength; 
+                packet[2] = currentTopicLen >> 8;
+                packet[3] = currentTopicLen & 0xFF;
+                memcpy(packet.get() + 4, topicStr.c_str(), currentTopicLen);
+                if (payloadLen > 0) { // Nur kopieren, wenn Payload vorhanden
+                    memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
+                }
 
                 logMessage(DEBUG_DEBUG, "📦 Sende Paket an Client ID: %s (Länge: %u)",
                            c->clientId.c_str(), (unsigned)(1 + 1 + remainingLength));
@@ -1379,7 +1452,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                 logMessage(DEBUG_DEBUG, "  - Senden %s",
                            writeSuccess ? "erfolgreich" : "fehlgeschlagen");
 
-                break; // pro Client nur einmal senden
+                break; 
             }
         }
 
@@ -1394,12 +1467,6 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                sentCount, clientCount);
 
     return messageSent;
-}
-
-bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, const char *payload)
-{
-    // Ruft die ursprüngliche publish-Methode mit umgekehrter Reihenfolge der Parameter auf
-    return publish(topic, payload, retained, qos);
 }
 
 bool ESPAsyncMQTTBroker::isValidTopicFilter(const String& filter) {

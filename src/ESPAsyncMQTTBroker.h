@@ -107,6 +107,17 @@ struct MQTTClient
     bool cleanSession;                 ///< Clean-Session-Flag (falls false, wird die Session gespeichert)
     std::vector<Subscription> subscriptions; ///< Abonnierte Topics
     uint8_t protocolVersion;           ///< MQTT Protokoll-Version: 4 = MQTT 3.1.1, 5 = MQTT 5.0
+
+    // Neue Member für Last Will and Testament (LWT)
+    bool hasWill {false};
+    String willTopic {};
+    std::unique_ptr<uint8_t[]> willPayload {nullptr};
+    size_t willPayloadLen {0};
+    uint8_t willQos {0};
+    bool willRetain {false};
+
+    // Neues Flag für saubere Trennung
+    bool gracefulDisconnect {false};   ///< True, wenn Client ein DISCONNECT Paket gesendet hat
 };
 
 /**
@@ -246,6 +257,9 @@ public:
      * @return true wenn die Nachricht erfolgreich veröffentlicht wurde
      */
     bool publish(const char* topic, uint8_t qos, bool retained, const char* payload);
+
+    // Neuer interner Publish-Overload für binären Payload (LWT)
+    bool publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos, const String& excludeClientId = "");
 
     /**
      * @brief Setzt die Broker-Konfiguration
