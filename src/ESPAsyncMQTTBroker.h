@@ -313,6 +313,30 @@ public:
     std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
 
 private:
+    // Struktur zum temporären Speichern von eingehenden QoS 2 Nachrichten
+    struct IncomingQoS2Message {
+        String topic;
+        std::unique_ptr<uint8_t[]> payload;
+        size_t payload_len;
+        bool retained;
+        String originalClientId; // ClientID des ursprünglichen Senders
+
+        // Konstruktor für einfaches Erstellen und Kopieren des Payloads
+        IncomingQoS2Message(const String& t, const uint8_t* p, size_t len, bool r, const String& clientId)
+            : topic(t), payload_len(len), retained(r), originalClientId(clientId) {
+            if (len > 0 && p != nullptr) {
+                payload.reset(new uint8_t[len]);
+                memcpy(payload.get(), p, len);
+            } else {
+                payload_len = 0; // Sicherstellen, dass die Länge 0 ist, wenn kein Payload vorhanden ist
+            }
+        }
+
+        // Standardkonstruktor, um map[]-Zugriff zu ermöglichen (obwohl wir ihn mit find/emplace verwenden werden)
+        IncomingQoS2Message() : payload_len(0), retained(false) {}
+    };
+    std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages; // Key: Packet ID
+
     std::unique_ptr<AsyncServer> server;
     uint16_t port;
     std::vector<std::unique_ptr<MQTTClient>> clients;
@@ -465,6 +489,20 @@ private:
      * @param format Das Format der Nachricht (printf-style)
      */
     void logMessage(DebugLevel level, const char* format, ...);
+
+    /**
+     * @brief Prüft, ob ein Topic-Filter gemäß MQTT-Spezifikation gültig ist.
+     * @param filter Der zu prüfende Topic-Filter.
+     * @return true, wenn der Filter gültig ist, sonst false.
+     */
+    bool isValidTopicFilter(const String& filter);
+
+    /**
+     * @brief Prüft, ob ein Topic-Name für eine PUBLISH-Nachricht gültig ist.
+     * @param topic Der zu prüfende Topic-Name.
+     * @return true, wenn der Topic-Name gültig ist, sonst false.
+     */
+    bool isValidPublishTopic(const String& topic);
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
