@@ -1,4 +1,4 @@
-// @version: 1.5.0 Builddatum 21-05.2025
+// @version: 1.6.0 Builddatum 23-07-2024
 /**
  * @file ESPAsyncMQTTBroker.h
  * @brief Asynchrone MQTT Broker-Implementierung für ESP32
@@ -216,6 +216,15 @@ typedef std::function<void(DebugLevel level, const String &message)> LoggingCall
  * - Persistente Sessions
  * - MQTT-Wildcard-Unterstützung (+ und #)
  * - Optimierte Speichernutzung mit Smart Pointern
+ *
+ * @note Keep-Alive Mechanismus:
+ * Der Broker überwacht die Aktivität jedes verbundenen Clients basierend auf dem vom
+ * Client im CONNECT-Paket spezifizierten Keep-Alive-Intervall. Wenn der Broker
+ * für einen Zeitraum von 1.5 * Keep-Alive-Intervall keine Nachricht oder kein
+ * PINGREQ-Paket vom Client empfängt, wird die Verbindung serverseitig geschlossen.
+ * Es liegt in der Verantwortung der MQTT-Client-Implementierung, rechtzeitig
+ * PINGREQ-Pakete zu senden, um die Verbindung aktiv zu halten, falls keine
+ * anderen Datenübertragungen stattfinden.
  */
 class ESPAsyncMQTTBroker
 {

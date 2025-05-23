@@ -1,4 +1,4 @@
-// @version: 1.5.0 Builddatum 21-05.2025
+// @version: 1.6.0 Builddatum 23-07-2024
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
 
