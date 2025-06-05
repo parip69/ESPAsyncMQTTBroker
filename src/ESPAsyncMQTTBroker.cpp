@@ -2,6 +2,31 @@
 #include "ESPAsyncMQTTBroker.h"
 #include "AsyncTcpServerAdapter.h" // Added for concrete TCP server implementation
 #include <cstdarg>
+#include <cstdint> // For uint32_t, uint8_t
+
+// Helper function to encode the Remaining Length field for an MQTT packet
+// Returns the number of bytes used for encoding (1-4).
+// Returns -1 if the length is too large to be encoded in 4 bytes.
+// Writes the encoded bytes to the provided buffer.
+// Buffer must be large enough (at least 4 bytes).
+static int encodeRemainingLength(uint32_t length, uint8_t* buffer) {
+    int numBytes = 0;
+    if (!buffer) return -1; // Basic null check for buffer
+
+    do {
+        if (numBytes >= 4) {
+            // This means the original length was >= 268435456 (128^4), which is too large.
+            return -1;
+        }
+        uint8_t digit = length % 128;
+        length /= 128;
+        if (length > 0) {
+            digit |= 0x80; // Set continuation bit
+        }
+        buffer[numBytes++] = digit;
+    } while (length > 0);
+    return numBytes;
+}
 
 // Zentrale Logging-Funktion
 void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
@@ -273,11 +298,11 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *mqttClient, uint8_t *data, si
     switch (packetType)
     {
     case MQTT_CONNECT:
-        handleConnect(client, data + idx, value);
+        handleConnect(mqttClient, data + idx, value);
         break;
 
     case MQTT_PUBLISH:
-        handlePublish(client, data + idx, value, header);
+        handlePublish(mqttClient, data + idx, value, header);
         break;
 
     case MQTT_PUBACK:
@@ -285,31 +310,31 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *mqttClient, uint8_t *data, si
         break;
 
     case MQTT_SUBSCRIBE:
-        handleSubscribe(client, data + idx, value);
+        handleSubscribe(mqttClient, data + idx, value);
         break;
 
     case MQTT_UNSUBSCRIBE:
-        handleUnsubscribe(client, data + idx, value);
+        handleUnsubscribe(mqttClient, data + idx, value);
         break;
 
     case MQTT_PINGREQ:
-        handlePingReq(client);
+        handlePingReq(mqttClient);
         break;
 
     case MQTT_DISCONNECT:
-        handleDisconnect(client);
+        handleDisconnect(mqttClient);
         break;
 
     case MQTT_PUBREC:
-        handlePubRec(client, data + idx, value);
+        handlePubRec(mqttClient, data + idx, value);
         break;
 
     case MQTT_PUBREL:
-        handlePubRel(client, data + idx, value);
+        handlePubRel(mqttClient, data + idx, value);
         break;
 
     case MQTT_PUBCOMP:
-        handlePubComp(client, data + idx, value);
+        handlePubComp(mqttClient, data + idx, value);
         break;
 
     default:
@@ -966,21 +991,45 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *mqttClient) // Renamed
                     continue;
                 }
 
-                // Paket auf Stack erstellen (falls es passt) oder dynamisch allozieren
-                if (totalLength <= MQTT_MAX_PACKET_SIZE)
-                {
-                    std::unique_ptr<uint8_t[]> packet(new uint8_t[totalLength]);
-                    packet[0] = (MQTT_PUBLISH << 4) | 0x01;
-                    packet[1] = totalLength - 2;
-                    packet[2] = topicLength >> 8;
-                    packet[3] = topicLength & 0xFF;
-                    memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
-                    memcpy(packet.get() + 4 + topicLength, msg->payload.get(), msg->length);
-                    mqttClient->client->write((const char *)packet.get(), totalLength); // Use mqttClient
+                // Corrected Packet Assembly for sendRetainedMessages
+                size_t actualRemainingLengthValue = 2 + topicLength + msg->length; // topicLength and msg->length should be in scope
+                uint8_t remainingLengthEncodedBytes[4];
+                int remainingLengthEncodedSize = encodeRemainingLength(actualRemainingLengthValue, remainingLengthEncodedBytes);
 
-                    logMessage(DEBUG_DEBUG, "Retained Message gesendet: %s (Länge: %u)",
-                               msg->topic.c_str(), (unsigned)msg->length);
+                if (remainingLengthEncodedSize < 0) {
+                    logMessage(DEBUG_ERROR, "SendRetained: Actual Remaining Length %u for topic '%s' is too large to encode.",
+                               (unsigned)actualRemainingLengthValue, msg->topic.c_str());
+                    continue;
                 }
+
+                size_t fixedHeaderSize = 1 + remainingLengthEncodedSize; // 1 byte for type, N for Rem Len
+                size_t totalPacketSize = fixedHeaderSize + actualRemainingLengthValue;
+
+                if (totalPacketSize > MQTT_MAX_PACKET_SIZE) {
+                    logMessage(DEBUG_ERROR, "SendRetained: Total packet size %u for topic '%s' exceeds MQTT_MAX_PACKET_SIZE %d.",
+                               (unsigned)totalPacketSize, msg->topic.c_str(), MQTT_MAX_PACKET_SIZE);
+                    continue;
+                }
+
+                auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[totalPacketSize]);
+                // Set correct QoS from stored message and Retain flag = 1
+                packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01;
+                memcpy(packet.get() + 1, remainingLengthEncodedBytes, remainingLengthEncodedSize);
+
+                size_t currentOffset = fixedHeaderSize;
+                packet[currentOffset++] = topicLength >> 8;
+                packet[currentOffset++] = topicLength & 0xFF;
+                memcpy(packet.get() + currentOffset, msg->topic.c_str(), topicLength);
+                currentOffset += topicLength;
+
+                if (msg->length > 0 && msg->payload) { // Ensure payload exists before memcpy
+                    memcpy(packet.get() + currentOffset, msg->payload.get(), msg->length);
+                }
+
+                // Send the packet
+                logMessage(DEBUG_DEBUG, "Retained Message gesendet: Topic='%s', TotalBytes=%u, QoS=%d",
+                           msg->topic.c_str(), (unsigned)totalPacketSize, msg->qos);
+                mqttClient->client->write((const char *)packet.get(), totalPacketSize);
                 break;
             }
         }
@@ -1146,30 +1195,42 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                     break;
                 }
 
-                // Paket zusammenbauen
-                size_t topicLen = topicStr.length();
-                size_t remainingLength = 2 + topicLen + payloadLen;
+                // Corrected Packet Assembly using encodeRemainingLength
+                // topicLen and payloadLen are from the outer scope of this publish method.
+                // topicStr is also from outer scope.
+                // header is also from outer scope.
+                size_t actualRemainingLengthValue = 2 + topicLen + payloadLen;
+                uint8_t remainingLengthEncodedBytes[4];
+                int remainingLengthEncodedSize = encodeRemainingLength(actualRemainingLengthValue, remainingLengthEncodedBytes);
 
-                if (remainingLength > 127)
-                {
-                    logMessage(DEBUG_ERROR, "Nachricht zu groß für einfache Kodierung: %u",
-                               (unsigned)remainingLength);
+                if (remainingLengthEncodedSize < 0) {
+                    logMessage(DEBUG_ERROR, "Publish: Actual Remaining Length %u is too large to encode.", (unsigned)actualRemainingLengthValue);
                     continue;
                 }
 
-                // Paket mit Smart Pointer erstellen
-                auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[1 + 1 + remainingLength]);
+                size_t fixedHeaderSize = 1 + remainingLengthEncodedSize; // 1 byte for type, N for Rem Len
+                size_t totalPacketSize = fixedHeaderSize + actualRemainingLengthValue;
+
+                if (totalPacketSize > MQTT_MAX_PACKET_SIZE) {
+                    logMessage(DEBUG_ERROR, "Publish: Total packet size %u exceeds MQTT_MAX_PACKET_SIZE %d.", (unsigned)totalPacketSize, MQTT_MAX_PACKET_SIZE);
+                    continue;
+                }
+
+                auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[totalPacketSize]);
                 packet[0] = header;
-                packet[1] = remainingLength; // bleibt < 128 Bytes
-                packet[2] = topicLen >> 8;
-                packet[3] = topicLen & 0xFF;
-                memcpy(packet.get() + 4, topicStr.c_str(), topicLen);
-                memcpy(packet.get() + 4 + topicLen, payload, payloadLen);
+                memcpy(packet.get() + 1, remainingLengthEncodedBytes, remainingLengthEncodedSize);
 
-                logMessage(DEBUG_DEBUG, "📦 Sende Paket an Client ID: %s (Länge: %u)",
-                           c->clientId.c_str(), (unsigned)(1 + 1 + remainingLength));
+                size_t currentOffset = fixedHeaderSize;
+                packet[currentOffset++] = topicLen >> 8;
+                packet[currentOffset++] = topicLen & 0xFF;
+                memcpy(packet.get() + currentOffset, topicStr.c_str(), topicLen);
+                currentOffset += topicLen;
+                memcpy(packet.get() + currentOffset, payload, payloadLen);
 
-                bool writeSuccess = c->client->write((const char *)packet.get(), 1 + 1 + remainingLength); // unique_ptr access
+                // Send the packet
+                logMessage(DEBUG_DEBUG, "📦 Sende Paket an Client ID: %s (TotalBytes: %u, Topic: '%s')",
+                           c->clientId.c_str(), (unsigned)totalPacketSize, topicStr.c_str());
+                bool writeSuccess = c->client->write((const char *)packet.get(), totalPacketSize);
 
                 if (writeSuccess)
                 {

@@ -1,3 +1,4 @@
+#include <WiFi.h>
 #include <ESPAsyncMQTTBroker.h>
 
 ESPAsyncMQTTBroker mqtt;
