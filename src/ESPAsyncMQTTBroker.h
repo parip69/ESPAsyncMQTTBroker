@@ -107,6 +107,14 @@ struct MQTTClient
     bool cleanSession;                 ///< Clean-Session-Flag (falls false, wird die Session gespeichert)
     std::vector<Subscription> subscriptions; ///< Abonnierte Topics
     uint8_t protocolVersion;           ///< MQTT Protokoll-Version: 4 = MQTT 3.1.1, 5 = MQTT 5.0
+    bool hasWill;                      ///< Flag für Last Will and Testament
+    bool gracefulDisconnect;           ///< Flag für ordnungsgemäße Trennung
+    String willTopic;                  ///< Will Topic
+    String willMessage;                ///< Will Message
+    uint8_t willQos;                   ///< Will QoS Level
+    bool willRetain;                   ///< Will Retain Flag
+    std::unique_ptr<uint8_t[]> willPayload;  ///< Will Payload (binary data)
+    size_t willPayloadLen;             ///< Länge des Will Payloads
 };
 
 /**
@@ -149,6 +157,43 @@ struct ESPAsyncMQTTBrokerConfig
     String username = "";              ///< Benutzername für Authentifizierung (wenn leer, ist keine Auth nötig)
     String password = "";              ///< Passwort für Authentifizierung
     bool ignoreLoopDeliver = false;    ///< Bei true werden Nachrichten nicht an den Absender zurückgesendet
+};
+
+/**
+ * @brief Repräsentiert eine eingehende QoS 2-Nachricht
+ */
+struct IncomingQoS2Message
+{
+    String topic;                      ///< Topic der Nachricht
+    std::unique_ptr<uint8_t[]> payload;  ///< Smart Pointer zum Nachrichteninhalt
+    size_t length;                     ///< Länge des Payloads
+    size_t payload_len;                ///< Alternative Länge (für Kompatibilität)
+    bool retained;                     ///< Retained-Flag
+    String senderClientId;             ///< Client-ID des Senders
+    String originalClientId;           ///< Original Client-ID des Senders (Alias)
+    
+    /**
+     * @brief Konstruktor für eine QoS 2-Nachricht
+     * @param t Topic der Nachricht
+     * @param p Pointer zum Payload-Buffer
+     * @param len Länge des Payloads
+     * @param ret Retained-Flag
+     * @param clientId Client-ID des Senders
+     */
+    IncomingQoS2Message(const String& t, const uint8_t* p, size_t len, bool ret, const String& clientId) 
+        : topic(t), length(len), payload_len(len), retained(ret), senderClientId(clientId), originalClientId(clientId) {
+        // Sichere Kopie des Payloads
+        if (len > 0 && p != nullptr) {
+            payload.reset(new uint8_t[len]);
+            if (len <= MQTT_MAX_PAYLOAD_SIZE) {
+                memcpy(payload.get(), p, len);
+            } else {
+                memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
+                length = MQTT_MAX_PAYLOAD_SIZE;
+                payload_len = MQTT_MAX_PAYLOAD_SIZE;
+            }
+        }
+    }
 };
 
 // Callback-Typdefinitionen für Ereignisbehandlung
@@ -458,13 +503,58 @@ private:
      * und zu trennen.
      */
     void checkTimeouts();
-    
-    /**
+      /**
      * @brief Zentrale Logging-Funktion
      * @param level Das Debug-Level der Nachricht
      * @param format Das Format der Nachricht (printf-style)
      */
     void logMessage(DebugLevel level, const char* format, ...);
+    
+    /**
+     * @brief Prüft, ob ein Topic-Name für PUBLISH gültig ist
+     * @param topic Das zu prüfende Topic
+     * @return true, wenn das Topic gültig ist
+     */
+    bool isValidPublishTopic(const String &topic);
+    
+    /**
+     * @brief Prüft, ob ein Topic-Filter für SUBSCRIBE gültig ist
+     * @param filter Der zu prüfende Filter
+     * @return true, wenn der Filter gültig ist
+     */
+    bool isValidTopicFilter(const String &filter);
+    
+    /**
+     * @brief Erweiterte publish-Methode mit binären Daten
+     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird
+     * @param payload Der binäre Inhalt der Nachricht
+     * @param payloadLen Die Länge des Payloads
+     * @param retained Ob die Nachricht als "retained" gespeichert werden soll
+     * @param qos Quality of Service (0, 1 oder 2)
+     * @param excludeClientId ID eines Clients, der die Nachricht nicht erhalten soll
+     * @return true wenn die Nachricht erfolgreich veröffentlicht wurde
+     */
+    bool publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos, const String& excludeClientId);
+
+private:
+    uint16_t port;                                    ///< TCP-Port des Brokers
+    std::unique_ptr<AsyncServer> server;              ///< TCP-Server
+    std::vector<std::unique_ptr<MQTTClient>> clients; ///< Verbundene Clients
+    std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages; ///< Gespeicherte Nachrichten
+    std::map<String, std::unique_ptr<MQTTClient>> persistentSessions; ///< Persistente Sessions
+    std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages; ///< QoS 2 Nachrichten in Bearbeitung    ESPAsyncMQTTBrokerConfig brokerConfig;            ///< Broker-Konfiguration
+    DebugLevel debugLevel = DEBUG_INFO;               ///< Aktuelles Debug-Level
+    esp_timer_handle_t timeoutTimer = nullptr;        ///< Timer für Timeout-Überwachung
+    std::map<String, String> connectedClientsInfo;    ///< Info über verbundene Clients (ClientID -> IP)
+
+    // Callback-Funktionen
+    ClientCallback clientConnectCallback = nullptr;
+    ClientDisconnectCallback clientDisconnectCallback = nullptr;
+    MessageCallback messageCallback = nullptr;
+    ErrorCallback errorCallback = nullptr;
+    SubscribeCallback subscribeCallback = nullptr;
+    UnsubscribeCallback unsubscribeCallback = nullptr;
+    LoggingCallback loggingCallback = nullptr;
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
