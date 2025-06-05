@@ -1,5 +1,6 @@
 // @version: 1.5.0 Builddatum 21-05.2025
 #include "ESPAsyncMQTTBroker.h"
+#include "AsyncTcpServerAdapter.h" // Added for concrete TCP server implementation
 #include <cstdarg>
 
 // Zentrale Logging-Funktion
@@ -56,11 +57,11 @@ ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
 
 void ESPAsyncMQTTBroker::begin()
 {
-    server.reset(new AsyncServer(port));
-    server->onClient([](void *arg, AsyncClient *client)
+    server.reset(new AsyncTcpServerAdapter(port)); // Changed to use adapter
+    server->onClient([](void *arg, ITcpClient *new_client_adapter) // Changed to ITcpClient
                      {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        broker->onClient(client); }, this);
+        broker->onClient(new_client_adapter); }, this);
     server->begin();
 
     // Asynchroner Timer: prüft alle 1 Sekunde die Timeouts
@@ -106,7 +107,7 @@ void ESPAsyncMQTTBroker::checkTimeouts()
             {
                 logMessage(DEBUG_INFO, "⏰ Client %s inaktiv, trenne Verbindung.",
                            mqttClient->clientId.c_str());
-                mqttClient->client->close();
+                mqttClient->client->close(); // unique_ptr access
                 // Der Client wird aus 'clients' beim Disconnect-Handler entfernt
                 ++it;
             }
@@ -134,22 +135,25 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
                (brokerConfig.username != "" ? "Ja" : "Nein"));
 }
 
-void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
+void ESPAsyncMQTTBroker::onClient(ITcpClient *new_client_adapter) // Changed parameter type
 {    auto mqttClient = std::unique_ptr<MQTTClient>(new MQTTClient());
-    mqttClient->client = client;
-    mqttClient->connected = false;
+    // mqttClient->client = client; // Old direct assignment
+    mqttClient->client.reset(new_client_adapter); // Take ownership of the adapter
+    mqttClient->connected = false; // Will be set true after successful CONNECT packet
     mqttClient->lastActivity = millis();
     mqttClient->keepAlive = 0; // Wird im CONNECT gesetzt
     mqttClient->cleanSession = true;
 
-    client->onData([](void *arg, AsyncClient *client, void *data, size_t len)
+    // Use new_client_adapter for setting up callbacks
+    new_client_adapter->onData([](void *arg, ITcpClient *tcp_client, void *data, size_t len) // Changed to ITcpClient
                    {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
         MQTTClient* mqttClient = nullptr;
         
         // Smart Pointer-sichere Iteration
         for (auto& c : broker->clients) {
-            if (c->client == client) {
+            // Compare ITcpClient pointers
+            if (c->client.get() == tcp_client) {
                 mqttClient = c.get();
                 break;
             }
@@ -167,13 +171,13 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
             mqttClient->lastActivity = millis();
         } }, this);
 
-    client->onDisconnect([](void *arg, AsyncClient *client)
+    new_client_adapter->onDisconnect([](void *arg, ITcpClient *tcp_client) // Changed to ITcpClient
                          {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
         
         // Mit Smart Pointern umgehen
         for (auto it = broker->clients.begin(); it != broker->clients.end(); ++it) {
-            if ((*it)->client == client) {
+            if ((*it)->client.get() == tcp_client) { // Compare ITcpClient pointers
                 auto& target = *it;
                 
                 if (!target->cleanSession) {
@@ -200,14 +204,14 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
             }
         } }, this);
 
-    client->onError([](void *arg, AsyncClient *client, int8_t error)
+    new_client_adapter->onError([](void *arg, ITcpClient *tcp_client, int8_t error) // Changed to ITcpClient
                     {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
         MQTTClient* mqttClient = nullptr;
         
         // Smart Pointer-sichere Iteration
         for (auto& c : broker->clients) {
-            if (c->client == client) {
+            if (c->client.get() == tcp_client) { // Compare ITcpClient pointers
                 mqttClient = c.get();
                 break;
             }
@@ -223,10 +227,10 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
     clients.push_back(std::move(mqttClient));
 
     logMessage(DEBUG_DEBUG, "Neue MQTT-Verbindung akzeptiert (IP: %s)",
-               client->remoteIP().toString().c_str());
+               new_client_adapter->remoteIP().c_str()); // Use ITcpClient method
 }
 
-void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t len)
+void ESPAsyncMQTTBroker::processPacket(MQTTClient *mqttClient, uint8_t *data, size_t len) // Renamed client to mqttClient for clarity
 {
     if (len < 2)
     {
@@ -558,7 +562,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         logMessage(DEBUG_ERROR, "🚫 Authentifizierung fehlgeschlagen - Verbindung abgelehnt");
 
         uint8_t connack[] = {0x20, 0x02, 0x00, 0x05};
-        client->client->write((const char *)connack, 4);
+        client->client->write((const char *)connack, 4); // unique_ptr access
         return;
     }
     else
@@ -571,14 +575,13 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         0x02,
         (uint8_t)(cleanSession ? 0x00 : 0x01),
         0x00};
-    client->client->write((const char *)connack, 4);
+    client->client->write((const char *)connack, 4); // unique_ptr access
     client->connected = true;
 
     // Client-Connect-Callback aufrufen
     if (clientConnectCallback)
     {
-        IPAddress ip = client->client->remoteIP();
-        String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
+        String ipStr = client->client->remoteIP(); // ITcpClient returns String
         clientConnectCallback(client->clientId, ipStr);
 
         // Speichere Client-Informationen
@@ -589,7 +592,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     sendRetainedMessages(client);
 }
 
-void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32_t length, uint8_t header)
+void ESPAsyncMQTTBroker::handlePublish(MQTTClient *mqttClient, uint8_t *data, uint32_t length, uint8_t header) // Renamed client to mqttClient
 {
     uint8_t qos = (header & 0x06) >> 1;
     bool retained = (header & 0x01) != 0;
@@ -635,7 +638,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
                 0x40, 0x02,
                 (uint8_t)(packetId >> 8),
                 (uint8_t)packetId};
-            client->client->write((const char *)puback, 4);
+            mqttClient->client->write((const char *)puback, 4); // unique_ptr access
         }
     }
 
@@ -660,16 +663,16 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
         if (messageCallback)
         {
-            messageCallback(client->clientId, topic, payloadStr);
+            messageCallback(mqttClient->clientId, topic, payloadStr);
         }
 
         // Verwende die erweiterte publish-Methode mit noLocal-Unterstützung
         // Die Nachricht weiterleiten, aber den absendenden Client ausschließen
-        publish(topic.c_str(), payloadStr.c_str(), retained, qos, client->clientId);
+        publish(topic.c_str(), payloadStr.c_str(), retained, qos, mqttClient->clientId);
     }
 }
 
-void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint32_t length)
+void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *mqttClient, uint8_t *data, uint32_t length) // Renamed client to mqttClient
 {
     if (length < 2)
     {
@@ -719,13 +722,13 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
         Subscription sub;
         sub.filter = topic;
         sub.noLocal = noLocal;
-        client->subscriptions.push_back(sub);
+        mqttClient->subscriptions.push_back(sub);
 
         returnCodes.push_back(requestedQoS);
 
         if (subscribeCallback)
         {
-            subscribeCallback(client->clientId, topic);
+            subscribeCallback(mqttClient->clientId, topic);
         }
     }
 
@@ -748,13 +751,13 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
         suback[4 + i] = returnCodes[i];
     }
 
-    client->client->write((const char *)suback.get(), 2 + subackLength);
+    mqttClient->client->write((const char *)suback.get(), 2 + subackLength); // unique_ptr access
 
     // Retained-Nachrichten für neue Subscriptions senden
-    sendRetainedMessages(client);
+    sendRetainedMessages(mqttClient);
 }
 
-void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, uint32_t length)
+void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *mqttClient, uint8_t *data, uint32_t length) // Renamed client to mqttClient
 {
     if (length < 2)
     {
@@ -770,7 +773,7 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
         0x02,
         (uint8_t)(packetId >> 8),
         (uint8_t)packetId};
-    client->client->write((const char *)unsuback, 4);
+    mqttClient->client->write((const char *)unsuback, 4); // unique_ptr access
 
     // Topics verarbeiten
     size_t index = 2;
@@ -798,15 +801,15 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
         index += topicLength;
 
         // Subscription entfernen
-        for (auto it = client->subscriptions.begin(); it != client->subscriptions.end();)
+        for (auto it = mqttClient->subscriptions.begin(); it != mqttClient->subscriptions.end();)
         {
             if (it->filter == topic)
             {
                 if (unsubscribeCallback)
                 {
-                    unsubscribeCallback(client->clientId, topic);
+                    unsubscribeCallback(mqttClient->clientId, topic);
                 }
-                it = client->subscriptions.erase(it);
+                it = mqttClient->subscriptions.erase(it);
             }
             else
             {
@@ -816,24 +819,24 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
     }
 }
 
-void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
+void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *mqttClient) // Renamed client to mqttClient
 {
     uint8_t pingresp[] = {0xD0, 0x00};
-    client->client->write((const char *)pingresp, 2);
-    logMessage(DEBUG_DEBUG, "PING von %s beantwortet", client->clientId.c_str());
+    mqttClient->client->write((const char *)pingresp, 2); // unique_ptr access
+    logMessage(DEBUG_DEBUG, "PING von %s beantwortet", mqttClient->clientId.c_str());
 }
 
-void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
+void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *mqttClient) // Renamed client to mqttClient
 {
-    logMessage(DEBUG_INFO, "Ordnungsgemäße Trennung von Client %s", client->clientId.c_str());
-    client->connected = false;
-    if (client->cleanSession && client->client)
+    logMessage(DEBUG_INFO, "Ordnungsgemäße Trennung von Client %s", mqttClient->clientId.c_str());
+    mqttClient->connected = false;
+    if (mqttClient->cleanSession && mqttClient->client)
     {
-        client->client->close();
+        mqttClient->client->close(); // unique_ptr access
     }
 }
 
-void ESPAsyncMQTTBroker::handlePubRec(MQTTClient *client, uint8_t *data, size_t len)
+void ESPAsyncMQTTBroker::handlePubRec(MQTTClient *mqttClient, uint8_t *data, size_t len) // Renamed client to mqttClient
 {
     if (len < 2)
     {
@@ -845,11 +848,11 @@ void ESPAsyncMQTTBroker::handlePubRec(MQTTClient *client, uint8_t *data, size_t 
         0x62, 0x02,
         (uint8_t)(packetId >> 8),
         (uint8_t)packetId};
-    client->client->write((const char *)pubrel, sizeof(pubrel));
+    mqttClient->client->write((const char *)pubrel, sizeof(pubrel)); // unique_ptr access
     logMessage(DEBUG_DEBUG, "PUBREC für Paket-ID %u verarbeitet", packetId);
 }
 
-void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t len)
+void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *mqttClient, uint8_t *data, size_t len) // Renamed client to mqttClient
 {
     if (len < 2)
     {
@@ -861,11 +864,11 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
         0x70, 0x02,
         (uint8_t)(packetId >> 8),
         (uint8_t)packetId};
-    client->client->write((const char *)pubcomp, sizeof(pubcomp));
+    mqttClient->client->write((const char *)pubcomp, sizeof(pubcomp)); // unique_ptr access
     logMessage(DEBUG_DEBUG, "PUBREL für Paket-ID %u verarbeitet", packetId);
 }
 
-void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *client, uint8_t *data, size_t len)
+void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *mqttClient, uint8_t *data, size_t len) // Renamed client to mqttClient
 {
     // Für QoS 2 Abschluss keine weitere Aktion erforderlich
     if (len >= 2)
@@ -936,11 +939,11 @@ bool ESPAsyncMQTTBroker::topicMatches(const String &subscription, const String &
     return (i == topicLevels.size());
 }
 
-void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
+void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *mqttClient) // Renamed client to mqttClient
 {
     for (auto &msg : retainedMessages)
     {
-        for (auto &sub : client->subscriptions)
+        for (auto &sub : mqttClient->subscriptions) // Use mqttClient
         {
             if (topicMatches(sub, msg->topic))
             {
@@ -973,7 +976,7 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                     packet[3] = topicLength & 0xFF;
                     memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
                     memcpy(packet.get() + 4 + topicLength, msg->payload.get(), msg->length);
-                    client->client->write((const char *)packet.get(), totalLength);
+                    mqttClient->client->write((const char *)packet.get(), totalLength); // Use mqttClient
 
                     logMessage(DEBUG_DEBUG, "Retained Message gesendet: %s (Länge: %u)",
                                msg->topic.c_str(), (unsigned)msg->length);
@@ -1166,7 +1169,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
                 logMessage(DEBUG_DEBUG, "📦 Sende Paket an Client ID: %s (Länge: %u)",
                            c->clientId.c_str(), (unsigned)(1 + 1 + remainingLength));
 
-                bool writeSuccess = c->client->write((const char *)packet.get(), 1 + 1 + remainingLength);
+                bool writeSuccess = c->client->write((const char *)packet.get(), 1 + 1 + remainingLength); // unique_ptr access
 
                 if (writeSuccess)
                 {

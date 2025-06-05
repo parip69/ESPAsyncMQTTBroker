@@ -24,7 +24,8 @@
 #define ESP_ASYNC_MQTT_BROKER_H
 
 #include <Arduino.h>
-#include <AsyncTCP.h>
+#include "ITcpServer.h" // Added
+#include "ITcpClient.h" // Added
 #include <vector>
 #include <map>
 #include <memory>  // Für Smart Pointer
@@ -99,7 +100,7 @@ struct Subscription
  */
 struct MQTTClient
 {
-    AsyncClient *client;               ///< Referenz zur TCP-Verbindung
+    std::unique_ptr<ITcpClient> client; ///< Referenz zur TCP-Verbindung via Interface
     String clientId;                   ///< Die vom Client angegebene Client-ID
     bool connected;                    ///< Verbindungsstatus
     uint32_t lastActivity;             ///< Zeitpunkt der letzten Aktivität für Timeout-Überwachung
@@ -313,7 +314,7 @@ public:
     std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
 
 private:
-    std::unique_ptr<AsyncServer> server;
+    std::unique_ptr<ITcpServer> server; // Changed
     uint16_t port;
     std::vector<std::unique_ptr<MQTTClient>> clients;
     std::vector<std::unique_ptr<RetainedMessage>> retainedMessages;
@@ -449,7 +450,7 @@ private:
      * @brief Callback für neue TCP-Verbindungen
      * @param client Der neue TCP-Client
      */
-    void onClient(AsyncClient *client);
+    void onClient(ITcpClient *new_client_adapter); // Changed
     
     /**
      * @brief Prüft Timeouts für alle verbundenen Clients
