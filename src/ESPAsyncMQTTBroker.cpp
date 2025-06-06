@@ -840,9 +840,10 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
         {
             Subscription sub;
             sub.filter = topic;
-            sub.noLocal = noLocal; // noLocal wird aus dem options-Byte gelesen
+            sub.noLocal = noLocal;
+            sub.grantedQos = requestedQoS; // <-- STORE THE GRANTED QOS
             client->subscriptions.push_back(sub);
-            returnCodes.push_back(requestedQoS); // QoS für gültigen Filter
+            returnCodes.push_back(requestedQoS); // SUBACK code is the granted QoS
             logMessage(DEBUG_INFO, "✅ Subscription für Client '%s' zu Topic-Filter '%s' hinzugefügt (QoS %d, noLocal %s).",
                        client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Ja" : "Nein");
 
@@ -948,6 +949,8 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
                     unsubscribeCallback(client->clientId, topic);
                 }
                 it = client->subscriptions.erase(it);
+                logMessage(DEBUG_INFO, "➖ Client '%s' unsubscribed from topic filter '%s'.",
+                           client->clientId.c_str(), topic.c_str());
             }
             else
             {
@@ -1201,7 +1204,10 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                 // Paket dynamisch allozieren
                 std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
                 // Verwende msg->qos für das QoS-Level der Retained Message
-                packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01; // Retain Flag ist 1
+                // packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01; // OLD: uses QoS of retained message
+                // NEW: uses granted QoS of the subscription
+                uint8_t deliveryQos = sub.grantedQos;
+                packet[0] = (MQTT_PUBLISH << 4) | (deliveryQos << 1) | 0x01; // Retain Flag ist 1 (as it's a retained message)
                 packet[1] = (uint8_t)remainingLengthField;                // Remaining Length (nur 1 Byte hier)
                 packet[2] = topicLength >> 8;
                 packet[3] = topicLength & 0xFF;
@@ -1215,8 +1221,9 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 
                 client->client->write((const char *)packet.get(), totalPacketLength);
 
-                logMessage(DEBUG_DEBUG, "Retained Message gesendet: Topic='%s', Payload-Länge=%u, QoS=%d",
-                           msg->topic.c_str(), (unsigned)actualPayloadLength, msg->qos);
+                // Update logging
+                logMessage(DEBUG_DEBUG, "Retained Message gesendet: Client='%s', Topic='%s', Payload-Länge=%u, Delivery QoS=%d",
+                           client->clientId.c_str(), msg->topic.c_str(), (unsigned)actualPayloadLength, deliveryQos);
 
                 break; // Wichtig: Nachricht wurde für diese Subscription gesendet.
                        // Gehe zur nächsten Retained Message (äußere Schleife).
@@ -1313,8 +1320,15 @@ bool ESPAsyncMQTTBroker::isValidPublishTopic(const String &topic)
 
 bool ESPAsyncMQTTBroker::publish(const char *topic, const char *payload, bool retained, uint8_t qos)
 {
-    // Die Basis-Methode ruft die erweiterte Methode mit leerer excludeClientId auf
-    return publish(topic, payload, retained, qos, "");
+    if (!payload) {
+        return publish(topic, (const uint8_t*)"", 0, retained, qos, "");
+    }
+    return publish(topic, (const uint8_t*)payload, strlen(payload), retained, qos, "");
+}
+
+// New public method for binary payloads
+bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos) {
+    return publish(topic, payload, payloadLen, retained, qos, ""); // Call the main private method
 }
 
 bool ESPAsyncMQTTBroker::publish(const char *topic,
@@ -1344,7 +1358,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic,
 
 bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, const char *payload)
 {
-    // Ruft die ursprüngliche publish-Methode mit umgekehrter Reihenfolge der Parameter auf
+    // Calls the standard signature publish method
     return publish(topic, payload, retained, qos);
 }
 
@@ -1393,20 +1407,28 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
     // Retained-Nachrichten verwalten
     if (retained)
     {
-        retainedMessages.erase(topicStr);
+        retainedMessages.erase(topicStr); // topicStr should be String(topic)
 
         if (payloadLen > 0)
         {
             auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr,
-                                                                            payload, // Direkt den uint8_t* verwenden
+                                                                            payload,
                                                                             payloadLen,
                                                                             qos));
             retainedMessages[topicStr] = std::move(msg);
+            // Optional: Log message about storing/updating retained message
+            logMessage(DEBUG_INFO, "💾 Retained message for topic '%s' stored/updated (QoS: %d, Len: %u).",
+                       topicStr.c_str(), qos, (unsigned)payloadLen);
+        } else {
+            // This is the case where an empty payload with retain=true clears the message.
+            // Ensure a log message is present here.
+            logMessage(DEBUG_INFO, "🗑️ Retained message for topic '%s' cleared (empty payload with retain=true).",
+                       topicStr.c_str());
         }
     }
 
     // Header mit QoS- und Retain-Bits
-    uint8_t header = (MQTT_PUBLISH << 4) | (qos << 1) | (retained ? 1 : 0);
+    // uint8_t header = (MQTT_PUBLISH << 4) | (qos << 1) | (retained ? 1 : 0); // OLD HEADER
 
     bool messageSent = false;
     int clientCount = 0;
@@ -1424,31 +1446,38 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         bool isOriginalPublisherAndShouldBeSkipped = false;
         if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
         {
-            bool foundNonNoLocalMatch = false;
+            bool foundNonNoLocalMatch = false; // True if a matching subscription *without* noLocal is found
             bool hasAnyMatchingSubscription = false;
-            for (auto &subCheck : c->subscriptions)
-            {
-                if (topicMatches(subCheck.filter, topicStr))
-                {
+            for (auto &subCheck : c->subscriptions) {
+                if (topicMatches(subCheck.filter, topicStr)) { // Ensure topicStr is the correct variable for the topic string
                     hasAnyMatchingSubscription = true;
-                    if (!subCheck.noLocal)
-                    {
+                    if (!subCheck.noLocal) { // If this specific matching subscription is NOT noLocal
                         foundNonNoLocalMatch = true;
-                        break;
+                        break; // We found one, so the client should receive the message
                     }
                 }
             }
-            if (hasAnyMatchingSubscription && !foundNonNoLocalMatch)
-            {
+            if (hasAnyMatchingSubscription && !foundNonNoLocalMatch) {
                 isOriginalPublisherAndShouldBeSkipped = true;
-                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) wird übersprungen (alle passenden Subscriptions haben noLocal=true)",
-                           c->clientId.c_str());
+                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher, Topic: %s) wird übersprungen (alle passenden Subscriptions haben noLocal=true)",
+                           c->clientId.c_str(), topicStr.c_str()); // Added topic to log
+            } else if (hasAnyMatchingSubscription && foundNonNoLocalMatch) {
+                // This case means the original publisher WILL receive the message because at least one subscription allows it.
+                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher, Topic: %s) wird NICHT übersprungen (mind. eine passende Subscription hat noLocal=false)",
+                           c->clientId.c_str(), topicStr.c_str()); // Added topic to log
+                isOriginalPublisherAndShouldBeSkipped = false; // Explicitly ensure it's false
+            } else if (!hasAnyMatchingSubscription) {
+                // This case means the original publisher has no matching subscription for this topic anyway.
+                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher, Topic: %s) hat keine passende Subscription. noLocal-Logik nicht relevant für Skip.",
+                           c->clientId.c_str(), topicStr.c_str()); // Added topic to log
+                isOriginalPublisherAndShouldBeSkipped = false; // Not skipped based on noLocal (would be skipped later by normal topic matching)
             }
+            // If it's not the original publisher, isOriginalPublisherAndShouldBeSkipped remains false.
         }
 
-        if (isOriginalPublisherAndShouldBeSkipped)
-        {
-            continue;
+        if (isOriginalPublisherAndShouldBeSkipped) {
+            // logMessage(DEBUG_DEBUG, "  Skipping delivery to %s for topic %s due to noLocal conditions.", c->clientId.c_str(), topicStr.c_str()); // This log can be part of the if block above.
+            continue; // Skip to the next client
         }
 
         for (auto &sub : c->subscriptions)
@@ -1472,6 +1501,9 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
                 }
 
                 auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[1 + 1 + remainingLength]);
+                // USE sub.grantedQos for the QoS bits in the header for this specific client
+                uint8_t deliveryQos = sub.grantedQos;
+                uint8_t header = (MQTT_PUBLISH << 4) | (deliveryQos << 1) | (retained ? 1 : 0); // NEW HEADER for this delivery
                 packet[0] = header;
                 packet[1] = remainingLength;
                 packet[2] = currentTopicLen >> 8;
@@ -1482,8 +1514,9 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
                     memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
                 }
 
-                logMessage(DEBUG_DEBUG, "📦 Sende Paket an Client ID: %s (Länge: %u)",
-                           c->clientId.c_str(), (unsigned)(1 + 1 + remainingLength));
+                // When logging, indicate the delivery QoS
+                logMessage(DEBUG_DEBUG, "📦 Sende Paket an Client ID: %s (Topic: %s, Delivery QoS: %d, Retained: %s, Länge: %u)",
+                           c->clientId.c_str(), topicStr.c_str(), deliveryQos, retained ? "Ja" : "Nein", (unsigned)(1 + 1 + remainingLength));
 
                 bool writeSuccess = c->client->write((const char *)packet.get(), 1 + 1 + remainingLength);
 

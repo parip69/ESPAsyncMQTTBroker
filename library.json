@@ -19,7 +19,7 @@
     "me-no-dev/AsyncTCP": "^1.1.1"
   },
   "frameworks": "arduino",
-  "platforms": "espressif32@^6.11.0",
+  "platforms": "espressif32@>=5.0.0, <7.0.0",
   "build": {
     "flags": [
       "-std=c++17"

@@ -90,7 +90,17 @@ enum DebugLevel
 struct Subscription
 {
     String filter;    ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
-    bool noLocal;     ///< MQTT 5.0 noLocal-Flag: Bei true erhält der Client keine selbst veröffentlichten Nachrichten
+    /**
+     * @brief MQTT 5.0 noLocal flag.
+     * If true, the client that made this subscription will not receive messages published by itself
+     * on topics matching this filter, provided all its matching subscriptions for the topic have noLocal set.
+     */
+    bool noLocal;
+    /**
+     * @brief The QoS level granted to the client for this specific subscription.
+     * The broker will attempt to deliver messages matching this filter to the client at this QoS level.
+     */
+    uint8_t grantedQos;
     // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 
@@ -217,6 +227,8 @@ typedef std::function<void(DebugLevel level, const String &message)> LoggingCall
  * - QoS 0, 1, und 2 Nachrichten
  * - Retained Messages (gespeicherte Nachrichten)
  * - Persistente Sessions
+ * - Nachrichten an Abonnenten werden unter Berücksichtigung des bei der Subscription
+ *   vereinbarten QoS-Levels (granted QoS) zugestellt.
  * - MQTT-Wildcard-Unterstützung (+ und #)
  * - Optimierte Speichernutzung mit Smart Pointern
  */
@@ -255,42 +267,50 @@ public:
      * Diese Methode wird verwendet, um eine Nachricht direkt vom Broker 
      * zu veröffentlichen, ohne dass ein Client diese senden muss.
      * 
-     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird
-     * @param payload Der Inhalt der Nachricht
-     * @param retained Ob die Nachricht als "retained" gespeichert werden soll
-     * @param qos Quality of Service (0, 1 oder 2)
-     * @return true wenn die Nachricht erfolgreich veröffentlicht wurde
+     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird.
+     * @param payload Der Inhalt der Nachricht als C-String.
+     * @param retained Ob die Nachricht als "retained" gespeichert werden soll (Standard: false).
+     * @param qos Quality of Service (0, 1 oder 2) (Standard: 0).
+     * @return true wenn die Nachricht erfolgreich an den Verteilungsprozess übergeben wurde.
      */
     bool publish(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
     
     /**
-     * @brief Erweiterte publish-Methode mit Client-Ausschluss
-     * 
-     * Diese Methode erlaubt es, einen Client anzugeben, der die Nachricht
-     * nicht erhalten soll (für noLocal-Unterstützung).
-     * 
-     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird
-     * @param payload Der Inhalt der Nachricht
-     * @param retained Ob die Nachricht als "retained" gespeichert werden soll
-     * @param qos Quality of Service (0, 1 oder 2)
-     * @param excludeClientId ID eines Clients, der die Nachricht nicht erhalten soll
-     * @return true wenn die Nachricht erfolgreich veröffentlicht wurde
+     * @brief Veröffentlicht eine Nachricht mit binärem Payload über den Broker.
+     * Dies ist eine der Standard-Publish-Methoden.
+     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird.
+     * @param payload Der binäre Inhalt der Nachricht.
+     * @param payloadLen Die Länge des Payloads.
+     * @param retained Ob die Nachricht als "retained" gespeichert werden soll (Standard: false).
+     * @param qos Quality of Service (0, 1 oder 2) (Standard: 0).
+     * @return true wenn die Nachricht erfolgreich an den Verteilungsprozess übergeben wurde.
+     */
+    bool publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained = false, uint8_t qos = 0);
+
+    /**
+     * @brief Erweiterte publish-Methode mit Client-Ausschluss und C-String Payload.
+     * Nützlich, wenn der Broker eine Nachricht veröffentlichen soll, die von einem bestimmten Client stammt,
+     * um die MQTT 5.0 noLocal-Logik serverseitig zu unterstützen.
+     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird.
+     * @param payload Der Inhalt der Nachricht als C-String.
+     * @param retained Ob die Nachricht als "retained" gespeichert werden soll.
+     * @param qos Quality of Service (0, 1 oder 2).
+     * @param excludeClientId ID des Clients, der die Nachricht ursprünglich gesendet hat und sie ggf. nicht erneut empfangen soll (abhängig von dessen 'noLocal' Subscriptions).
+     * @return true wenn die Nachricht erfolgreich an den Verteilungsprozess übergeben wurde.
      */
     bool publish(const char* topic, const char* payload, bool retained, uint8_t qos, const String& excludeClientId);
 
     /**
-     * @brief Alternative publish-Methode mit anderer Parameter-Reihenfolge
-     * 
-     * Diese Methode ist für die Kompatibilität mit bestehendem Code.
-     * Sie nimmt die Parameter in der Reihenfolge topic, qos, retain, payload.
-     * 
-     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird
-     * @param qos Quality of Service (0, 1 oder 2)
-     * @param retained Ob die Nachricht als "retained" gespeichert werden soll
-     * @param payload Der Inhalt der Nachricht
-     * @return true wenn die Nachricht erfolgreich veröffentlicht wurde
+     * @brief Alternative publish-Methode mit anderer Parameter-Reihenfolge.
+     * @deprecated Veraltet zugunsten von publish(topic, payload, retained, qos).
+     * Diese Methode ist für die Kompatibilität mit bestehendem Code vorhanden.
+     * @param topic Das Topic, unter dem die Nachricht veröffentlicht wird.
+     * @param qos Quality of Service (0, 1 oder 2).
+     * @param retained Ob die Nachricht als "retained" gespeichert werden soll.
+     * @param payload Der Inhalt der Nachricht als C-String.
+     * @return true wenn die Nachricht erfolgreich veröffentlicht wurde.
      */
-    bool publish(const char* topic, uint8_t qos, bool retained, const char* payload);
+    [[deprecated("Use publish(topic, payload, retained, qos) instead")]] bool publish(const char* topic, uint8_t qos, bool retained, const char* payload);
 
     /**
      * @brief Setzt die Broker-Konfiguration
