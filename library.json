@@ -1,6 +1,6 @@
 {
   "name": "ESPAsyncMQTTBroker",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "An asynchronous MQTT broker for ESP32",
   "keywords": "mqtt, broker, async, esp32",
   "repository": {
@@ -13,7 +13,7 @@
     }
   ],
   "dependencies": {
-    "ESP32Async/AsyncTCP": "^2.0.0"
+    "AsyncTCP": ">=2.0.0"
   },
   "frameworks": "arduino",
   "platforms": "espressif32"
