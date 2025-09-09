@@ -12,9 +12,16 @@
       "name": "parip69"
     }
   ],
-  "dependencies": {
-    "ESP32Async/AsyncTCP": "^2.0.0"
-  },
+  "dependencies": [
+    {
+      "name": "AsyncTCP",
+      "platforms": "espressif32"
+    },
+    {
+      "name": "ArduinoJson",
+      "platforms": "espressif32"
+    }
+  ],
   "frameworks": "arduino",
   "platforms": "espressif32"
 }
