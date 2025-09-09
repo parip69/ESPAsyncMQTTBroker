@@ -168,7 +168,7 @@ public:
 private:
     uint16_t port;
     std::unique_ptr<AsyncServer> server;
-    std::vector<std::unique_ptr<MQTTClient>> clients;
+    std::map<AsyncClient *, std::unique_ptr<MQTTClient>> clients;
     std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
     std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages;

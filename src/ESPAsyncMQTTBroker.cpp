@@ -92,13 +92,13 @@ void ESPAsyncMQTTBroker::checkTimeouts()
     uint32_t now = millis();
     for (auto it = clients.begin(); it != clients.end();)
     {
-        auto &mqttClient = *it;
+        auto &mqttClient = it->second;
         if (mqttClient->connected && mqttClient->keepAlive > 0)
         {
             if (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL)
             {
                 logMessage(DEBUG_INFO, "Client %s inactive, disconnecting.", mqttClient->clientId.c_str());
-                mqttClient->client->close();
+                mqttClient->client->close(); // This will trigger onDisconnect and remove the client
                 ++it;
             }
             else
@@ -139,21 +139,13 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
     client->onData([](void *arg, AsyncClient *client, void *data, size_t len)
                    {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* mqttClient = nullptr;
-
-        for (auto& c : broker->clients) {
-            if (c->client == client) {
-                mqttClient = c.get();
-                break;
-            }
-        }
-
-        if (mqttClient) {
+        auto it = broker->clients.find(client);
+        if (it != broker->clients.end()) {
+            MQTTClient* mqttClient = it->second.get();
             if (len > MQTT_MAX_PACKET_SIZE) {
                 broker->logMessage(DEBUG_ERROR, "Packet size exceeds limit: %u > %u", (unsigned)len, (unsigned)MQTT_MAX_PACKET_SIZE);
                 return;
             }
-
             broker->processPacket(mqttClient, (uint8_t*)data, len);
             mqttClient->lastActivity = millis();
         } }, this);
@@ -161,59 +153,47 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
     client->onDisconnect([](void *arg, AsyncClient *client)
                          {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
+        auto it = broker->clients.find(client);
+        if (it != broker->clients.end()) {
+            auto& target = it->second;
 
-        for (auto it = broker->clients.begin(); it != broker->clients.end(); ++it) {
-            if ((*it)->client == client) {
-                auto& target = *it;
-
-                if (target->hasWill && !target->gracefulDisconnect) {
-                    broker->logMessage(DEBUG_INFO, "Unclean disconnect from client %s. Publishing LWT: Topic='%s', QoS=%d, Retain=%s",
-                                       target->clientId.c_str(), target->willTopic.c_str(), target->willQos, target->willRetain ? "Yes" : "No");
-
-                    broker->publish(target->willTopic.c_str(), target->willPayload.get(), target->willPayloadLen, target->willRetain, target->willQos, "");
-
-                    target->hasWill = false;
-                } else if (target->hasWill && target->gracefulDisconnect) {
-                    broker->logMessage(DEBUG_DEBUG, "LWT for client %s not sent (clean disconnect already handled).", target->clientId.c_str());
-                }
-
-                if (!target->cleanSession) {
-                    broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), session will be kept.",
-                                     target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
-
-                    broker->persistentSessions[target->clientId] = std::move(target);
-                    broker->clients.erase(it);
-                } else {
-                    broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), Clean Session, removing client.",
-                                     target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
-                    if (broker->clientDisconnectCallback) {
-                        broker->clientDisconnectCallback(target->clientId);
-                    }
-                    broker->connectedClientsInfo.erase(target->clientId);
-                    broker->clients.erase(it);
-                }
-                break;
+            if (target->hasWill && !target->gracefulDisconnect) {
+                broker->logMessage(DEBUG_INFO, "Unclean disconnect from client %s. Publishing LWT: Topic='%s', QoS=%d, Retain=%s",
+                                   target->clientId.c_str(), target->willTopic.c_str(), target->willQos, target->willRetain ? "Yes" : "No");
+                broker->publish(target->willTopic.c_str(), target->willPayload.get(), target->willPayloadLen, target->willRetain, target->willQos, "");
+                target->hasWill = false;
+            } else if (target->hasWill && target->gracefulDisconnect) {
+                broker->logMessage(DEBUG_DEBUG, "LWT for client %s not sent (clean disconnect already handled).", target->clientId.c_str());
             }
+
+            if (!target->cleanSession) {
+                broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), session will be kept.",
+                                 target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
+                broker->persistentSessions[target->clientId] = std::move(target);
+            } else {
+                broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), Clean Session, removing client.",
+                                 target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
+                if (broker->clientDisconnectCallback) {
+                    broker->clientDisconnectCallback(target->clientId);
+                }
+                broker->connectedClientsInfo.erase(target->clientId);
+            }
+            broker->clients.erase(it);
         } }, this);
 
     client->onError([](void *arg, AsyncClient *client, int8_t error)
                     {
         ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-        MQTTClient* mqttClient = nullptr;
-
-        for (auto& c : broker->clients) {
-            if (c->client == client) {
-                mqttClient = c.get();
-                break;
+        auto it = broker->clients.find(client);
+        if (it != broker->clients.end()) {
+            MQTTClient* mqttClient = it->second.get();
+            if (broker->errorCallback && mqttClient) {
+                broker->logMessage(DEBUG_ERROR, "Client %s Error: %d", mqttClient->clientId.c_str(), error);
+                broker->errorCallback(mqttClient->clientId, error, "Client Error");
             }
-        }
-
-        if (broker->errorCallback && mqttClient) {
-            broker->logMessage(DEBUG_ERROR, "Client %s Error: %d", mqttClient->clientId.c_str(), error);
-            broker->errorCallback(mqttClient->clientId, error, "Client Error");
         } }, this);
 
-    clients.push_back(std::move(mqttClient));
+    clients[client] = std::move(mqttClient);
 
     logMessage(DEBUG_DEBUG, "New MQTT connection accepted (IP: %s)", client->remoteIP().toString().c_str());
 }
@@ -897,7 +877,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
         {
             char tempPayload[msg.payload_len + 1];
             memcpy(tempPayload, msg.payload.get(), msg.payload_len);
-            tempPayload[msg.payload_len] = '�';
+            tempPayload[msg.payload_len] = '\0';
             payloadStr = String(tempPayload);
         }
         else
@@ -935,51 +915,40 @@ bool ESPAsyncMQTTBroker::topicMatches(const Subscription &subscription, const St
     return topicMatches(subscription.filter, topic);
 }
 
-bool ESPAsyncMQTTBroker::topicMatches(const String &subscription, const String &topic)
-{
-    std::vector<String> subLevels;
-    int start = 0;
-    int pos = 0;
-    while ((pos = subscription.indexOf('/', start)) != -1)
-    {
-        subLevels.push_back(subscription.substring(start, pos));
-        start = pos + 1;
-    }
-    subLevels.push_back(subscription.substring(start));
+bool ESPAsyncMQTTBroker::topicMatches(const String &filter, const String &topic) {
+    const char *f = filter.c_str();
+    const char *t = topic.c_str();
 
-    std::vector<String> topicLevels;
-    start = 0;
-    while ((pos = topic.indexOf('/', start)) != -1)
-    {
-        topicLevels.push_back(topic.substring(start, pos));
-        start = pos + 1;
-    }
-    topicLevels.push_back(topic.substring(start));
+    while (*f && *t) {
+        const char *f_end = strchr(f, '/');
+        const char *t_end = strchr(t, '/');
 
-    int i = 0;
-    for (; i < subLevels.size(); i++)
-    {
-        String subPart = subLevels[i];
+        size_t f_len = f_end ? (size_t)(f_end - f) : strlen(f);
 
-        if (subPart == "#")
-        {
+        if (f_len == 1 && *f == '#') {
             return true;
         }
 
-        if (subPart == "+")
-        {
-            if (i >= topicLevels.size())
-                return false;
+        if (f_len == 1 && *f == '+') {
+            f = f_end ? f_end + 1 : f + f_len;
+            t = t_end ? t_end + 1 : t + strlen(t);
             continue;
         }
 
-        if (i >= topicLevels.size() || subPart != topicLevels[i])
-        {
+        size_t t_len = t_end ? (size_t)(t_end - t) : strlen(t);
+        if (f_len != t_len || strncmp(f, t, f_len) != 0) {
             return false;
         }
+
+        f = f_end ? f_end + 1 : f + f_len;
+        t = t_end ? t_end + 1 : t + t_len;
     }
 
-    return (i == topicLevels.size());
+    if (*f && strcmp(f, "/#") == 0) {
+        return true;
+    }
+
+    return *f == *t;
 }
 
 void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
@@ -1197,8 +1166,30 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
     int clientCount = 0;
     int sentCount = 0;
 
-    for (auto &c : clients)
+    size_t currentTopicLen = topicStr.length();
+    size_t remainingLength = 2 + currentTopicLen + payloadLen;
+
+    if (remainingLength > 127)
     {
+        logMessage(DEBUG_ERROR, "Message too large for simple Remaining Length encoding: %u. Topic: %s", (unsigned)remainingLength, topicStr.c_str());
+        return false;
+    }
+
+    size_t packetSize = 1 + 1 + remainingLength;
+    auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
+    packet[0] = header;
+    packet[1] = remainingLength;
+    packet[2] = currentTopicLen >> 8;
+    packet[3] = currentTopicLen & 0xFF;
+    memcpy(packet.get() + 4, topicStr.c_str(), currentTopicLen);
+    if (payloadLen > 0)
+    {
+        memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
+    }
+
+    for (auto it = clients.begin(); it != clients.end(); ++it)
+    {
+        auto& c = it->second;
         if (!c->connected)
             continue;
 
@@ -1243,29 +1234,9 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
 
             if (matched)
             {
-                size_t currentTopicLen = topicStr.length();
-                size_t remainingLength = 2 + currentTopicLen + payloadLen;
+                logMessage(DEBUG_DEBUG, "Sending packet to Client ID: %s (Length: %u)", c->clientId.c_str(), (unsigned)packetSize);
 
-                if (remainingLength > 127)
-                {
-                    logMessage(DEBUG_ERROR, "Message too large for simple Remaining Length encoding: %u. Client: %s, Topic: %s", (unsigned)remainingLength, c->clientId.c_str(), topicStr.c_str());
-                    continue;
-                }
-
-                auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[1 + 1 + remainingLength]);
-                packet[0] = header;
-                packet[1] = remainingLength;
-                packet[2] = currentTopicLen >> 8;
-                packet[3] = currentTopicLen & 0xFF;
-                memcpy(packet.get() + 4, topicStr.c_str(), currentTopicLen);
-                if (payloadLen > 0)
-                {
-                    memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
-                }
-
-                logMessage(DEBUG_DEBUG, "Sending packet to Client ID: %s (Length: %u)", c->clientId.c_str(), (unsigned)(1 + 1 + remainingLength));
-
-                bool writeSuccess = c->client->write((const char *)packet.get(), 1 + 1 + remainingLength);
+                bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
 
                 if (writeSuccess)
                 {
