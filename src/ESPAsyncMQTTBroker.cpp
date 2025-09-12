@@ -2,7 +2,7 @@
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
 
-// Zentrale Logging-Funktion
+// Zentrale Logging-Funktion.
 void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 {
     if (level <= debugLevel)
