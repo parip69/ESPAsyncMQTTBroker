@@ -17,5 +17,5 @@ void setup() {
 }
 
 void loop() {
-  mqtt.loop();
+  // The loop function is no longer needed for the broker
 }

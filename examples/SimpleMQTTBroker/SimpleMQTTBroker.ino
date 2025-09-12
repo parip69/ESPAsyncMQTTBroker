@@ -16,24 +16,23 @@ const int ledPin = 2; // Integrierte LED an den meisten ESP32-Boards
 bool ledState = false;
 
 // Diese Funktion wird aufgerufen, wenn eine MQTT-Nachricht empfangen wird
-void onMQTTMessage(String clientId, String topic, String message) {
+void onMQTTMessage(const char* clientId, const char* topic, const uint8_t* payload, size_t len) {
+  char payloadStr[len + 1];
+  memcpy(payloadStr, payload, len);
+  payloadStr[len] = '\0';
+
   Serial.printf("Nachricht empfangen von %s auf Topic '%s': %s\n", 
-                clientId.c_str(), topic.c_str(), message.c_str());
+                clientId, topic, payloadStr);
   
   // Beispiel: Bei Nachricht auf Topic "led/control" die LED steuern
-  if (topic == "led/control") {
-    if (message == "on" || message == "true") {
-      digitalWrite(ledPin, HIGH);
-      ledState = true;
-      // Statusbestätigung senden
-      mqttBroker.publish("led/status", 0, true, "on");
-    } 
-    else if (message == "off" || message == "false") {
-      digitalWrite(ledPin, LOW);
-      ledState = false;
-      // Statusbestätigung senden
-      mqttBroker.publish("led/status", 0, true, "off");
-    }
+  if (strcmp(topic, "led/control") == 0) {
+    bool turnOn = (strcmp(payloadStr, "on") == 0 || strcmp(payloadStr, "true") == 0);
+    digitalWrite(ledPin, turnOn ? HIGH : LOW);
+    ledState = turnOn;
+
+    // Statusbestätigung senden
+    const char* status = turnOn ? "on" : "off";
+    mqttBroker.publish("led/status", (const uint8_t*)status, strlen(status), true, 0);
   }
 }
 
@@ -59,25 +58,26 @@ void setup() {
   mqttBroker.setDebugLevel(DEBUG_INFO); // Optionen: DEBUG_NONE, DEBUG_ERROR, DEBUG_INFO, DEBUG_DEBUG
   
   // Client-Verbindungen überwachen
-  mqttBroker.onClientConnect([](String clientId, String clientIp) {
-    Serial.printf("Client verbunden: %s (%s)\n", clientId.c_str(), clientIp.c_str());
+  mqttBroker.onClientConnect([](const char* clientId, const char* clientIp) {
+    Serial.printf("Client verbunden: %s (%s)\n", clientId, clientIp);
     
     // Optionales Willkommenssignal senden
-    String welcomeMsg = "Willkommen " + clientId + "!";
-    mqttBroker.publish("broker/clients", 0, false, welcomeMsg.c_str());
+    char welcomeMsg[128];
+    snprintf(welcomeMsg, sizeof(welcomeMsg), "Willkommen %s!", clientId);
+    mqttBroker.publish("broker/clients", (const uint8_t*)welcomeMsg, strlen(welcomeMsg), false, 0);
   });
   
   // Client-Trennungen überwachen
-  mqttBroker.onClientDisconnect([](String clientId) {
-    Serial.printf("Client getrennt: %s\n", clientId.c_str());
+  mqttBroker.onClientDisconnect([](const char* clientId) {
+    Serial.printf("Client getrennt: %s\n", clientId);
   });
   
   // Nachrichtenempfang-Handler festlegen
   mqttBroker.onMessage(onMQTTMessage);
   
   // Abonnement-Ereignisse überwachen (Optional)
-  mqttBroker.onSubscribe([](String clientId, const String &topic) {
-    Serial.printf("Client %s hat Topic abonniert: %s\n", clientId.c_str(), topic.c_str());
+  mqttBroker.onSubscribe([](const char* clientId, const char* topic) {
+    Serial.printf("Client %s hat Topic abonniert: %s\n", clientId, topic);
   });
   
   // MQTT-Broker starten
@@ -85,7 +85,8 @@ void setup() {
   Serial.println("MQTT-Broker gestartet auf Port 1883");
   
   // Anfangsstatus der LED veröffentlichen
-  mqttBroker.publish("led/status", 0, true, "off");
+  const char* initialStatus = "off";
+  mqttBroker.publish("led/status", (const uint8_t*)initialStatus, strlen(initialStatus), true, 0);
 }
 
 void loop() {
@@ -94,18 +95,18 @@ void loop() {
   if (millis() - lastPublish > 10000) {
     lastPublish = millis();
     
+    char buffer[32];
+
     // Uptime in Minuten
     int uptime = lastPublish / 60000;
-    String uptimeStr = String(uptime);
+    snprintf(buffer, sizeof(buffer), "%d", uptime);
+    mqttBroker.publish("system/uptime", (const uint8_t*)buffer, strlen(buffer), true, 0);
     
     // Freier Heap-Speicher
-    String heapStr = String(ESP.getFreeHeap());
+    snprintf(buffer, sizeof(buffer), "%u", ESP.getFreeHeap());
+    mqttBroker.publish("system/heap", (const uint8_t*)buffer, strlen(buffer), true, 0);
     
-    // Veröffentlichen der Systemdaten
-    mqttBroker.publish("system/uptime", 0, true, uptimeStr.c_str());
-    mqttBroker.publish("system/heap", 0, true, heapStr.c_str());
-    
-    Serial.printf("Systemdaten veröffentlicht - Uptime: %d min, Heap: %s\n", 
-                  uptime, heapStr.c_str());
+    Serial.printf("Systemdaten veröffentlicht - Uptime: %d min, Heap: %u\n",
+                  uptime, ESP.getFreeHeap());
   }
 }

@@ -41,19 +41,26 @@ void publishStatusMessage(bool retain = false);
 void checkModeSwitch();
 
 // MQTT-Nachrichtenverarbeitung für Broker-Modus
-void onBrokerMessage(String clientId, String topic, String message) {
+void onBrokerMessage(const char* clientId, const char* topic, const uint8_t* payload, size_t len) {
+  char payloadStr[len + 1];
+  memcpy(payloadStr, payload, len);
+  payloadStr[len] = '\0';
+
   Serial.printf("[Broker] Nachricht von %s auf Topic '%s': %s\n", 
-                clientId.c_str(), topic.c_str(), message.c_str());
+                clientId, topic, payloadStr);
   
   // LED-Steuerung
-  if (topic == mqttRootTopic + String("/led/control")) {
-    if (message == "on") {
-      digitalWrite(ledPin, HIGH);
-      mqttBroker.publish((mqttRootTopic + String("/led/status")).c_str(), 0, true, "on");
-    } else if (message == "off") {
-      digitalWrite(ledPin, LOW);
-      mqttBroker.publish((mqttRootTopic + String("/led/status")).c_str(), 0, true, "off");
-    }
+  char ledControlTopic[128];
+  snprintf(ledControlTopic, sizeof(ledControlTopic), "%s/led/control", mqttRootTopic);
+
+  if (strcmp(topic, ledControlTopic) == 0) {
+    bool turnOn = (strcmp(payloadStr, "on") == 0);
+    digitalWrite(ledPin, turnOn ? HIGH : LOW);
+
+    char ledStatusTopic[128];
+    snprintf(ledStatusTopic, sizeof(ledStatusTopic), "%s/led/status", mqttRootTopic);
+    const char* status = turnOn ? "on" : "off";
+    mqttBroker.publish(ledStatusTopic, (const uint8_t*)status, strlen(status), true, 0);
   }
 }
 
@@ -167,8 +174,8 @@ void setupBrokerMode() {
   mqttBroker.setDebugLevel(DEBUG_INFO);
   
   // Client-Verbindungs-Callback
-  mqttBroker.onClientConnect([](String clientId, String clientIp) {
-    Serial.printf("Client verbunden: %s (%s)\n", clientId.c_str(), clientIp.c_str());
+  mqttBroker.onClientConnect([](const char* clientId, const char* clientIp) {
+    Serial.printf("Client verbunden: %s (%s)\n", clientId, clientIp);
   });
   
   // Nachrichtenempfang-Callback
@@ -215,14 +222,30 @@ void setupClientMode() {
 }
 
 void publishStatusMessage(bool retain) {
-  String uptime = String(millis() / 1000);
-  String mode = isBrokerMode ? "broker" : "client";
-  
+  char topic[128];
+  char payload[64];
+
   if (isBrokerMode) {
-    mqttBroker.publish((mqttRootTopic + String("/status/uptime")).c_str(), 0, retain, uptime.c_str());
-    mqttBroker.publish((mqttRootTopic + String("/status/mode")).c_str(), 0, retain, mode.c_str());
-    mqttBroker.publish((mqttRootTopic + String("/status/ip")).c_str(), 0, retain, WiFi.localIP().toString().c_str());
+    // Publish uptime
+    snprintf(topic, sizeof(topic), "%s/status/uptime", mqttRootTopic);
+    snprintf(payload, sizeof(payload), "%lu", millis() / 1000);
+    mqttBroker.publish(topic, (const uint8_t*)payload, strlen(payload), retain, 0);
+
+    // Publish mode
+    snprintf(topic, sizeof(topic), "%s/status/mode", mqttRootTopic);
+    const char* modeStr = "broker";
+    mqttBroker.publish(topic, (const uint8_t*)modeStr, strlen(modeStr), retain, 0);
+
+    // Publish IP
+    snprintf(topic, sizeof(topic), "%s/status/ip", mqttRootTopic);
+    WiFi.localIP().toString().toCharArray(payload, sizeof(payload));
+    mqttBroker.publish(topic, (const uint8_t*)payload, strlen(payload), retain, 0);
+
   } else if (mqttClient.connected()) {
+    // Client mode uses AsyncMqttClient, which has a different publish signature
+    // This part of the code is unaffected by the changes to ESPAsyncMQTTBroker
+    String uptime = String(millis() / 1000);
+    String mode = "client";
     mqttClient.publish((mqttRootTopic + String("/status/uptime")).c_str(), 0, retain, uptime.c_str());
     mqttClient.publish((mqttRootTopic + String("/status/mode")).c_str(), 0, retain, mode.c_str());
     mqttClient.publish((mqttRootTopic + String("/status/ip")).c_str(), 0, retain, WiFi.localIP().toString().c_str());
