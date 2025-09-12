@@ -116,6 +116,11 @@ void ESPAsyncMQTTBroker::checkTimeouts()
 void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
 {
     brokerConfig = config;
+    if (brokerConfig.log) {
+        setDebugLevel(DEBUG_INFO);
+    } else {
+        setDebugLevel(DEBUG_NONE);
+    }
     logMessage(DEBUG_INFO, "MQTT-Broker Configuration:");
     logMessage(DEBUG_INFO, "   Username: %s", (brokerConfig.username.isEmpty() ? "[empty]" : brokerConfig.username.c_str()));
     logMessage(DEBUG_INFO, "   Password: %s", (brokerConfig.password.isEmpty() ? "[empty]" : "[set]"));

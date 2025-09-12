@@ -107,6 +107,7 @@ struct ESPAsyncMQTTBrokerConfig
     String username = "";
     String password = "";
     bool ignoreLoopDeliver = false;
+    bool log = true;
 };
 
 struct IncomingQoS2Message
