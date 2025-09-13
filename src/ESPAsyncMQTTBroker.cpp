@@ -1,6 +1,7 @@
 // @version: 1.5.1
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
+#include <algorithm>
 
 // Zentrale Logging-Funktion.
 void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
@@ -12,8 +13,6 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
         va_start(args, format);
         vsnprintf(buffer, sizeof(buffer), format, args);
         va_end(args);
-
-        String message = buffer;
 
         // Log ausgeben (Serial oder über Callback)
         if (level <= DEBUG_ERROR)
@@ -29,12 +28,12 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
             Serial.print("🔍 ");
         }
 
-        Serial.println(message);
+        Serial.println(buffer);
 
         // Wenn verfügbar, auch an Callback weiterleiten
         if (loggingCallback)
         {
-            loggingCallback(level, message);
+            loggingCallback(level, buffer);
         }
     }
 }
@@ -46,10 +45,6 @@ ESPAsyncMQTTBroker::ESPAsyncMQTTBroker(uint16_t port) : port(port)
 ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
 {
     stop();
-    clients.clear();
-    retainedMessages.clear();
-    persistentSessions.clear();
-    connectedClientsInfo.clear();
 }
 
 void ESPAsyncMQTTBroker::begin()
@@ -93,25 +88,16 @@ void ESPAsyncMQTTBroker::stop()
 void ESPAsyncMQTTBroker::checkTimeouts()
 {
     uint32_t now = millis();
-    for (auto it = clients.begin(); it != clients.end();)
+    for (auto it = clients.begin(); it != clients.end(); ++it)
     {
         auto &mqttClient = it->second;
         if (mqttClient->connected && mqttClient->keepAlive > 0)
         {
             if (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL)
             {
-                logMessage(DEBUG_INFO, "Client ⏰  inactive, disconnecting.", mqttClient->clientId.c_str());
+                logMessage(DEBUG_INFO, "Client '%s' ⏰  inactive, disconnecting.", mqttClient->clientId);
                 mqttClient->client->close(); // This will trigger onDisconnect and remove the client
-                ++it;
             }
-            else
-            {
-                ++it;
-            }
-        }
-        else
-        {
-            ++it;
         }
     }
 }
@@ -125,21 +111,23 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
         setDebugLevel(DEBUG_NONE);
     }
     logMessage(DEBUG_INFO, "🔧 MQTT-Broker Configuration:");
-    logMessage(DEBUG_INFO, "   Username: %s", (brokerConfig.username.isEmpty() ? "[empty]" : brokerConfig.username.c_str()));
-    logMessage(DEBUG_INFO, "   Password: %s", (brokerConfig.password.isEmpty() ? "[empty]" : "[set]"));
-    logMessage(DEBUG_INFO, "   Auth required: %s", (brokerConfig.username != "" ? "Yes" : "No"));
+    logMessage(DEBUG_INFO, "   Username: %s", (brokerConfig.username[0] == '\0' ? "[empty]" : brokerConfig.username));
+    logMessage(DEBUG_INFO, "   Password: %s", (brokerConfig.password[0] == '\0' ? "[empty]" : "[set]"));
+    logMessage(DEBUG_INFO, "   Auth required: %s", (brokerConfig.username[0] != '\0' ? "Yes" : "No"));
 }
 
 void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 {
-    auto mqttClient = std::unique_ptr<MQTTClient>(new MQTTClient());
+    auto mqttClient = std::make_unique<MQTTClient>();
     mqttClient->client = client;
     mqttClient->connected = false;
     mqttClient->lastActivity = millis();
     mqttClient->keepAlive = 0;
     mqttClient->cleanSession = true;
+    mqttClient->clientId[0] = '\0';
     mqttClient->hasWill = false;
     mqttClient->gracefulDisconnect = false;
+    mqttClient->willTopic[0] = '\0';
     mqttClient->willQos = 0;
     mqttClient->willRetain = false;
     mqttClient->willPayloadLen = 0;
@@ -167,24 +155,27 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
             if (target->hasWill && !target->gracefulDisconnect) {
                 broker->logMessage(DEBUG_INFO, "Unclean disconnect from client %s. Publishing LWT: Topic='%s', QoS=%d, Retain=%s",
-                                   target->clientId.c_str(), target->willTopic.c_str(), target->willQos, target->willRetain ? "Yes" : "No");
-                broker->publish(target->willTopic.c_str(), target->willPayload.get(), target->willPayloadLen, target->willRetain, target->willQos, "");
+                                   target->clientId, target->willTopic, target->willQos, target->willRetain ? "Yes" : "No");
+                broker->publish(target->willTopic, target->willPayload.get(), target->willPayloadLen, target->willRetain, target->willQos, nullptr);
                 target->hasWill = false;
             } else if (target->hasWill && target->gracefulDisconnect) {
-                broker->logMessage(DEBUG_DEBUG, "LWT for client %s not sent (clean disconnect already handled).", target->clientId.c_str());
+                broker->logMessage(DEBUG_DEBUG, "LWT for client %s not sent (clean disconnect already handled).", target->clientId);
             }
 
             if (!target->cleanSession) {
                 broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), session will be kept.",
-                                 target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
-                broker->persistentSessions[target->clientId] = std::move(target);
+                                 target->clientId, target->gracefulDisconnect ? "Yes" : "No");
+                broker->persistentSessions.push_back(std::move(target));
             } else {
                 broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), Clean Session, removing client.",
-                                 target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
+                                 target->clientId, target->gracefulDisconnect ? "Yes" : "No");
                 if (broker->clientDisconnectCallback) {
                     broker->clientDisconnectCallback(target->clientId);
                 }
-                broker->connectedClientsInfo.erase(target->clientId);
+                auto& vec = broker->connectedClientsInfo;
+                vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const ClientInfo& ci) {
+                    return strcmp(ci.clientId, target->clientId) == 0;
+                }), vec.end());
             }
             broker->clients.erase(it);
         } }, this);
@@ -196,7 +187,7 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
         if (it != broker->clients.end()) {
             MQTTClient* mqttClient = it->second.get();
             if (broker->errorCallback && mqttClient) {
-                broker->logMessage(DEBUG_ERROR, "Client %s Error: %d", mqttClient->clientId.c_str(), error);
+                broker->logMessage(DEBUG_ERROR, "Client %s Error: %d", mqttClient->clientId, error);
                 broker->errorCallback(mqttClient->clientId, error, "Client Error");
             }
         } }, this);
@@ -368,28 +359,25 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         return;
     }
 
-    char clientIdBuffer[256] = {0};
-    if (clientIdLength < sizeof(clientIdBuffer))
-    {
-        memcpy(clientIdBuffer, data + offset, clientIdLength);
-    }
-    else
-    {
+    if (clientIdLength > MQTT_MAX_CLIENT_ID_SIZE) {
         logMessage(DEBUG_ERROR, "Client-ID too long!");
         return;
     }
-
-    String clientId = String(clientIdBuffer);
-    client->clientId = clientId;
+    memcpy(client->clientId, data + offset, clientIdLength);
+    client->clientId[clientIdLength] = '\0';
     offset += clientIdLength;
 
     bool sessionActuallyRestored = false;
-    auto sessionIt = persistentSessions.find(clientId);
-    if (!cleanSession && sessionIt != persistentSessions.end())
+    auto& sessions = persistentSessions;
+    auto sessionIt = std::find_if(sessions.begin(), sessions.end(), [&](const auto& s) {
+        return strcmp(s->clientId, client->clientId) == 0;
+    });
+
+    if (!cleanSession && sessionIt != sessions.end())
     {
-        logMessage(DEBUG_INFO, "♻️ Wiederverwende persistente Session für Client: %s", clientId.c_str());
-        client->subscriptions = sessionIt->second->subscriptions;
-        persistentSessions.erase(sessionIt);
+        logMessage(DEBUG_INFO, "♻️ Wiederverwende persistente Session für Client: %s", client->clientId);
+        client->subscriptions = (*sessionIt)->subscriptions;
+        sessions.erase(sessionIt);
         sessionActuallyRestored = true;
     }
 
@@ -397,7 +385,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     client->keepAlive = keepAlive;
 
     logMessage(DEBUG_DEBUG, "CONNECT Flags: 0x%02X, Clean Session: %s, Keep-Alive: %d seconds", connectFlags, (cleanSession ? "Yes" : "No"), keepAlive);
-    logMessage(DEBUG_DEBUG, "Client-ID: '%s'", clientId.c_str());
+    logMessage(DEBUG_DEBUG, "Client-ID: '%s'", client->clientId);
 
     if (willFlag)
     {
@@ -425,13 +413,12 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
             client->client->close();
             return;
         }
-        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
-        memcpy(willTopicBuffer, data + offset, willTopicLen);
-        client->willTopic = String(willTopicBuffer);
+        memcpy(client->willTopic, data + offset, willTopicLen);
+        client->willTopic[willTopicLen] = '\0';
 
         if (!isValidPublishTopic(client->willTopic))
         {
-            logMessage(DEBUG_ERROR, "Invalid Will-Topic name: '%s' (contains wildcards). Closing connection.", client->willTopic.c_str());
+            logMessage(DEBUG_ERROR, "Invalid Will-Topic name: '%s' (contains wildcards). Closing connection.", client->willTopic);
             client->client->close();
             return;
         }
@@ -473,15 +460,15 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         }
         offset += willPayloadActualLen;
 
-        logMessage(DEBUG_DEBUG, "LWT registered: Topic='%s', QoS=%d, Retain=%s, PayloadLen=%u", client->willTopic.c_str(), client->willQos, client->willRetain ? "Yes" : "No", client->willPayloadLen);
+        logMessage(DEBUG_DEBUG, "LWT registered: Topic='%s', QoS=%d, Retain=%s, PayloadLen=%u", client->willTopic, client->willQos, client->willRetain ? "Yes" : "No", client->willPayloadLen);
     }
     else
     {
         client->hasWill = false;
     }
 
-    String username = "";
-    String password = "";
+    char username[MQTT_MAX_USERNAME_SIZE + 1] = {0};
+    char password[MQTT_MAX_PASSWORD_SIZE + 1] = {0};
     if (usernameFlag)
     {
         if (offset + 2 > length)
@@ -497,11 +484,10 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
             return;
         }
 
-        char usernameBuffer[256] = {0};
-        if (usernameLen < sizeof(usernameBuffer))
+        if (usernameLen < sizeof(username))
         {
-            memcpy(usernameBuffer, data + offset, usernameLen);
-            username = String(usernameBuffer);
+            memcpy(username, data + offset, usernameLen);
+            username[usernameLen] = '\0';
         }
         else
         {
@@ -526,11 +512,10 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
             return;
         }
 
-        char passwordBuffer[256] = {0};
-        if (passwordLen < sizeof(passwordBuffer))
+        if (passwordLen < sizeof(password))
         {
-            memcpy(passwordBuffer, data + offset, passwordLen);
-            password = String(passwordBuffer);
+            memcpy(password, data + offset, passwordLen);
+            password[passwordLen] = '\0';
         }
         else
         {
@@ -561,9 +546,16 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     if (clientConnectCallback)
     {
         IPAddress ip = client->client->remoteIP();
-        String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
+        char ipStr[16];
+        snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
         clientConnectCallback(client->clientId, ipStr);
-        connectedClientsInfo[client->clientId] = ipStr;
+
+        ClientInfo info;
+        strncpy(info.clientId, client->clientId, MQTT_MAX_CLIENT_ID_SIZE);
+        info.clientId[MQTT_MAX_CLIENT_ID_SIZE] = '\0';
+        strncpy(info.ip, ipStr, sizeof(info.ip) - 1);
+        info.ip[sizeof(info.ip)-1] = '\0';
+        connectedClientsInfo.push_back(info);
     }
 
     sendRetainedMessages(client);
@@ -592,13 +584,12 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         return;
     }
 
-    char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
+    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
     memcpy(topicBuffer, data + 2, topicLength);
-    String topic = String(topicBuffer);
 
-    if (!isValidPublishTopic(topic))
+    if (!isValidPublishTopic(topicBuffer))
     {
-        logMessage(DEBUG_ERROR, "Invalid Topic Name '%s' from client '%s'. Closing connection.", topic.c_str(), client->clientId.c_str());
+        logMessage(DEBUG_ERROR, "Invalid Topic Name '%s' from client '%s'. Closing connection.", topicBuffer, client->clientId);
         if (client->client)
         {
             client->client->close();
@@ -622,6 +613,8 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         {
             uint8_t puback[] = {0x40, 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
             client->client->write((const char *)puback, 4);
+            // Original implementation did not publish here for QoS 1, only for QoS 0.
+            // Reverting to that behavior to be safe during refactoring.
         }
         else if (qos == 2)
         {
@@ -632,10 +625,10 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
                 payloadLength = MQTT_MAX_PAYLOAD_SIZE;
             }
 
-            IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
+            IncomingQoS2Message qos2Msg(topicBuffer, data + payloadOffset, payloadLength, retained, client->clientId);
             incomingQoS2Messages[packetId] = std::move(qos2Msg);
 
-            logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
+            logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topicBuffer, packetId);
 
             uint8_t pubrec[] = {(MQTT_PUBREC << 4), 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
             client->client->write((const char *)pubrec, 4);
@@ -643,40 +636,24 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         }
     }
 
-    if (qos == 0)
-    {
+    if (qos == 0) {
         uint32_t payloadLength = length - payloadOffset;
-        if (payloadLength > 0)
+        const uint8_t* payload = data + payloadOffset;
+
+        if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
         {
-            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
-            {
-                logMessage(DEBUG_WARNING, "Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
-                payloadLength = MQTT_MAX_PAYLOAD_SIZE;
-            }
-
-            char payloadBuffer[MQTT_MAX_PAYLOAD_SIZE + 1] = {0};
-            memcpy(payloadBuffer, data + payloadOffset, payloadLength);
-            payloadBuffer[payloadLength] = 0;
-
-            String payloadStr = String(payloadBuffer);
-            logMessage(DEBUG_INFO, "🔔 Publish (QoS 0) - Topic='%s', Payload='%s'", topic.c_str(), payloadStr.c_str());
-
-            if (messageCallback)
-            {
-                messageCallback(client->clientId, topic, payloadStr);
-            }
-
-            publish(topic.c_str(), payloadStr.c_str(), retained, qos, client->clientId);
+            logMessage(DEBUG_WARNING, "Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
+            payloadLength = MQTT_MAX_PAYLOAD_SIZE;
         }
-        else if (retained)
+
+        logMessage(DEBUG_INFO, "🔔 Publish (QoS 0) - Topic='%s'", topicBuffer);
+
+        if (messageCallback)
         {
-            logMessage(DEBUG_INFO, "Publish (QoS 0, empty Retained) - Topic='%s'", topic.c_str());
-            if (messageCallback)
-            {
-                messageCallback(client->clientId, topic, "");
-            }
-            publish(topic.c_str(), "", retained, qos, client->clientId);
+            messageCallback(client->clientId, topicBuffer, payload, payloadLength);
         }
+
+        publish(topicBuffer, payload, payloadLength, retained, qos, client->clientId);
     }
 }
 
@@ -708,9 +685,8 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
             break;
         }
 
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
+        char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
         memcpy(topicBuffer, data + index, topicLength);
-        String topic = String(topicBuffer);
         index += topicLength;
 
         if (index >= length)
@@ -722,23 +698,24 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
 
         logMessage(DEBUG_DEBUG, "Subscribe: Topic '%s', QoS %d, noLocal: %s", topicBuffer, requestedQoS, noLocal ? "true" : "false");
 
-        if (isValidTopicFilter(topic))
+        if (isValidTopicFilter(topicBuffer))
         {
             Subscription sub;
-            sub.filter = topic;
+            strncpy(sub.filter, topicBuffer, MQTT_MAX_TOPIC_SIZE);
+            sub.filter[MQTT_MAX_TOPIC_SIZE] = '\0';
             sub.noLocal = noLocal;
             client->subscriptions.push_back(sub);
             returnCodes.push_back(requestedQoS);
-            logMessage(DEBUG_INFO, "Subscription for client '%s' to topic filter '%s' added (QoS %d, noLocal %s).", client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Yes" : "No");
+            logMessage(DEBUG_INFO, "Subscription for client '%s' to topic filter '%s' added (QoS %d, noLocal %s).", client->clientId, topicBuffer, requestedQoS, noLocal ? "Yes" : "No");
 
             if (subscribeCallback)
             {
-                subscribeCallback(client->clientId, topic);
+                subscribeCallback(client->clientId, topicBuffer);
             }
         }
         else
         {
-            logMessage(DEBUG_WARNING, "Subscription for client '%s' to invalid topic filter '%s' rejected.", client->clientId.c_str(), topic.c_str());
+            logMessage(DEBUG_WARNING, "Subscription for client '%s' to invalid topic filter '%s' rejected.", client->clientId, topicBuffer);
             if (client->protocolVersion == MQTT_PROTOCOL_LEVEL_5)
             {
                 returnCodes.push_back(0x8F);
@@ -755,20 +732,24 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
         logMessage(DEBUG_ERROR, "No valid subscriptions in SUBSCRIBE packet");
         return;
     }
-    size_t subackLength = 2 + returnCodes.size();
-    std::unique_ptr<uint8_t[]> suback(new uint8_t[2 + subackLength]);
+    size_t subackPayloadLength = returnCodes.size();
+    size_t subackPacketLength = 4 + subackPayloadLength;
+    if (subackPacketLength > MQTT_MAX_PACKET_SIZE) {
+        logMessage(DEBUG_ERROR, "SUBACK packet too large: %d", subackPacketLength);
+        return;
+    }
 
-    suback[0] = MQTT_SUBACK << 4;
-    suback[1] = subackLength;
-    suback[2] = packetId >> 8;
-    suback[3] = packetId & 0xFF;
+    _packet_buffer[0] = MQTT_SUBACK << 4;
+    _packet_buffer[1] = 2 + subackPayloadLength; // remaining length
+    _packet_buffer[2] = packetId >> 8;
+    _packet_buffer[3] = packetId & 0xFF;
 
     for (size_t i = 0; i < returnCodes.size(); i++)
     {
-        suback[4 + i] = returnCodes[i];
+        _packet_buffer[4 + i] = returnCodes[i];
     }
 
-    client->client->write((const char *)suback.get(), 2 + subackLength);
+    client->client->write((const char *)_packet_buffer, subackPacketLength);
 
     sendRetainedMessages(client);
 }
@@ -803,26 +784,18 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
             break;
         }
 
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
+        char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
         memcpy(topicBuffer, data + index, topicLength);
-        String topic = String(topicBuffer);
         index += topicLength;
 
-        for (auto it = client->subscriptions.begin(); it != client->subscriptions.end();)
-        {
-            if (it->filter == topic)
-            {
-                if (unsubscribeCallback)
-                {
-                    unsubscribeCallback(client->clientId, topic);
-                }
-                it = client->subscriptions.erase(it);
+        auto& subs = client->subscriptions;
+        subs.erase(std::remove_if(subs.begin(), subs.end(), [&](const Subscription& s) {
+            bool match = (strcmp(s.filter, topicBuffer) == 0);
+            if (match && unsubscribeCallback) {
+                unsubscribeCallback(client->clientId, topicBuffer);
             }
-            else
-            {
-                ++it;
-            }
-        }
+            return match;
+        }), subs.end());
     }
 }
 
@@ -830,20 +803,20 @@ void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
 {
     uint8_t pingresp[] = {0xD0, 0x00};
     client->client->write((const char *)pingresp, 2);
-    logMessage(DEBUG_DEBUG, "PING from %s answered", client->clientId.c_str());
+    logMessage(DEBUG_DEBUG, "PING from %s answered", client->clientId);
 }
 
 void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
 {
-    logMessage(DEBUG_INFO, "Clean disconnect from client %s (DISCONNECT packet received).", client->clientId.c_str());
+    logMessage(DEBUG_INFO, "Clean disconnect from client %s (DISCONNECT packet received).", client->clientId);
     client->connected = false;
     client->gracefulDisconnect = true;
 
     if (client->hasWill)
     {
-        logMessage(DEBUG_DEBUG, "LWT for client %s is discarded (clean disconnect).", client->clientId.c_str());
+        logMessage(DEBUG_DEBUG, "LWT for client %s is discarded (clean disconnect).", client->clientId);
         client->hasWill = false;
-        client->willTopic = "";
+        client->willTopic[0] = '\0';
         client->willPayload.reset();
         client->willPayloadLen = 0;
     }
@@ -881,22 +854,9 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
     {
         IncomingQoS2Message &msg = it->second;
 
-        String payloadStr;
-        if (msg.payload_len > 0 && msg.payload)
-        {
-            char tempPayload[msg.payload_len + 1];
-            memcpy(tempPayload, msg.payload.get(), msg.payload_len);
-            tempPayload[msg.payload_len] = '\0';
-            payloadStr = String(tempPayload);
-        }
-        else
-        {
-            payloadStr = "";
-        }
+        logMessage(DEBUG_INFO, "PUBREL for packet ID %u received. Publishing QoS 2 message: Topic='%s'", packetId, msg.topic);
 
-        logMessage(DEBUG_INFO, "PUBREL for packet ID %u received. Publishing QoS 2 message: Topic='%s'", packetId, msg.topic.c_str());
-
-        publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2, msg.originalClientId);
+        publish(msg.topic, msg.payload.get(), msg.payload_len, msg.retained, MQTT_QOS2, msg.originalClientId);
 
         incomingQoS2Messages.erase(it);
     }
@@ -919,148 +879,142 @@ void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *client, uint8_t *data, size_t
     }
 }
 
-bool ESPAsyncMQTTBroker::topicMatches(const Subscription &subscription, const String &topic)
-{
-    return topicMatches(subscription.filter, topic);
-}
-
-bool ESPAsyncMQTTBroker::topicMatches(const String &filter, const String &topic) {
-    const char *f = filter.c_str();
-    const char *t = topic.c_str();
+bool ESPAsyncMQTTBroker::topicMatches(const char* filter, const char* topic) {
+    const char *f = filter;
+    const char *t = topic;
 
     while (*f && *t) {
+        // Find end of current level
         const char *f_end = strchr(f, '/');
         const char *t_end = strchr(t, '/');
 
         size_t f_len = f_end ? (size_t)(f_end - f) : strlen(f);
 
+        // Check for '#' wildcard
         if (f_len == 1 && *f == '#') {
-            return true;
+            // '#' must be the last character in the filter
+            return (f_end == nullptr);
         }
 
+        // Check for '+' wildcard
         if (f_len == 1 && *f == '+') {
+            // '+' matches one level, so we just advance pointers
             f = f_end ? f_end + 1 : f + f_len;
             t = t_end ? t_end + 1 : t + strlen(t);
             continue;
         }
 
+        // Compare levels
         size_t t_len = t_end ? (size_t)(t_end - t) : strlen(t);
         if (f_len != t_len || strncmp(f, t, f_len) != 0) {
             return false;
         }
 
+        // Advance to next level
         f = f_end ? f_end + 1 : f + f_len;
         t = t_end ? t_end + 1 : t + t_len;
     }
 
-    if (*f && strcmp(f, "/#") == 0) {
+    // Handle case where filter ends with '/#'
+    if (strcmp(f, "/#") == 0) {
         return true;
     }
 
+    // If both strings ended at the same time, it's a match
     return *f == *t;
 }
 
 void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 {
-    for (auto const &entry : retainedMessages)
+    for (const auto& msg : retainedMessages)
     {
-        auto const &msg = entry.second;
-
         if (!msg)
         {
-            logMessage(DEBUG_ERROR, "Error: Invalid unique_ptr in retainedMessages Map found.");
+            logMessage(DEBUG_ERROR, "Error: Invalid unique_ptr in retainedMessages vector found.");
             continue;
         }
 
-        for (auto &sub : client->subscriptions)
+        for (const auto& sub : client->subscriptions)
         {
-            if (topicMatches(sub, msg->topic))
+            if (topicMatches(sub.filter, msg->topic))
             {
-                size_t topicLength = msg->topic.length();
-
-                if (topicLength > MQTT_MAX_TOPIC_SIZE)
-                {
-                    logMessage(DEBUG_ERROR, "Retained Topic too long: %u > %u", (unsigned)topicLength, MQTT_MAX_TOPIC_SIZE);
-                    continue;
-                }
+                size_t topicLength = strlen(msg->topic);
 
                 size_t actualPayloadLength = msg->length;
                 if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
                 {
-                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
+                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic, (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
                     actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
                 }
 
                 size_t remainingLengthField = 2 + topicLength + actualPayloadLength;
-                size_t totalPacketLength = 1 + 1 + remainingLengthField;
-
-                if (remainingLengthField > 127)
+                if (remainingLengthField > 127) // Simplified Remaining Length encoding check
                 {
-                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) too large for simple Remaining Length encoding: %u.", msg->topic.c_str(), (unsigned)remainingLengthField);
+                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) too large for simple Remaining Length encoding: %u.", msg->topic, (unsigned)remainingLengthField);
                     continue;
                 }
 
+                size_t totalPacketLength = 1 + 1 + remainingLengthField;
                 if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
                 {
-                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) exceeds MQTT_MAX_PACKET_SIZE: %u > %u.", msg->topic.c_str(), (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
+                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) exceeds MQTT_MAX_PACKET_SIZE: %u > %u.", msg->topic, (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
                     continue;
                 }
 
-                std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
-                packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01;
-                packet[1] = (uint8_t)remainingLengthField;
-                packet[2] = topicLength >> 8;
-                packet[3] = topicLength & 0xFF;
-                memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
+                _packet_buffer[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01; // Retain = 1
+                _packet_buffer[1] = (uint8_t)remainingLengthField;
+                _packet_buffer[2] = topicLength >> 8;
+                _packet_buffer[3] = topicLength & 0xFF;
+                memcpy(_packet_buffer + 4, msg->topic, topicLength);
 
                 if (actualPayloadLength > 0 && msg->payload)
                 {
-                    memcpy(packet.get() + 4 + topicLength, msg->payload.get(), actualPayloadLength);
+                    memcpy(_packet_buffer + 4 + topicLength, msg->payload.get(), actualPayloadLength);
                 }
 
-                client->client->write((const char *)packet.get(), totalPacketLength);
+                client->client->write((const char *)_packet_buffer, totalPacketLength);
 
-                logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic.c_str(), (unsigned)actualPayloadLength, msg->qos);
+                logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic, (unsigned)actualPayloadLength, msg->qos);
 
-                break;
+                break; // A given retained message is sent only once per client on subscribe
             }
         }
     }
 }
 
-bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String &password)
+bool ESPAsyncMQTTBroker::authenticateClient(const char* username, const char* password)
 {
     logMessage(DEBUG_DEBUG, "🔐 Authentication attempt:");
-    logMessage(DEBUG_DEBUG, "   - Received Username: '%s'", username.c_str());
-    logMessage(DEBUG_DEBUG, "   - Password: %s", (password.isEmpty() ? "[empty]" : "********"));
-    logMessage(DEBUG_DEBUG, "   - Configured Username: '%s'", brokerConfig.username.c_str());
-    logMessage(DEBUG_DEBUG, "   - Configured Password: %s", (brokerConfig.password.isEmpty() ? "[empty]" : "********"));
+    logMessage(DEBUG_DEBUG, "   - Received Username: '%s'", username);
+    logMessage(DEBUG_DEBUG, "   - Password: %s", (password[0] == '\0' ? "[empty]" : "********"));
+    logMessage(DEBUG_DEBUG, "   - Configured Username: '%s'", brokerConfig.username);
+    logMessage(DEBUG_DEBUG, "   - Configured Password: %s", (brokerConfig.password[0] == '\0' ? "[empty]" : "********"));
 
-    if (brokerConfig.username.isEmpty())
+    if (brokerConfig.username[0] == '\0')
     {
         logMessage(DEBUG_INFO, "✅ Anonymous access allowed (no username configured)");
         return true;
     }
 
-    if (username.isEmpty())
+    if (username[0] == '\0')
     {
         logMessage(DEBUG_ERROR, "❌ Connection without username not allowed");
         return false;
     }
 
-    if (username != brokerConfig.username)
+    if (strcmp(username, brokerConfig.username) != 0)
     {
         logMessage(DEBUG_ERROR, "❌ Wrong username");
         return false;
     }
 
-    if (brokerConfig.password.isEmpty())
+    if (brokerConfig.password[0] == '\0')
     {
         logMessage(DEBUG_INFO, "✅ Username correct, no password required");
         return true;
     }
 
-    if (password != brokerConfig.password)
+    if (strcmp(password, brokerConfig.password) != 0)
     {
         logMessage(DEBUG_ERROR, "❌ Wrong password");
         return false;
@@ -1070,70 +1024,44 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
     return true;
 }
 
-bool ESPAsyncMQTTBroker::isValidPublishTopic(const String &topic)
+bool ESPAsyncMQTTBroker::isValidPublishTopic(const char* topic)
 {
-    if (topic.isEmpty())
+    if (topic == nullptr || topic[0] == '\0')
     {
         logMessage(DEBUG_WARNING, "Invalid publish topic: Topic is empty.");
         return false;
     }
 
-    if (topic.length() > MQTT_MAX_TOPIC_SIZE)
+    if (strlen(topic) > MQTT_MAX_TOPIC_SIZE)
     {
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' exceeds max length of %d.", topic.c_str(), MQTT_MAX_TOPIC_SIZE);
+        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' exceeds max length of %d.", topic, MQTT_MAX_TOPIC_SIZE);
         return false;
     }
 
-    if (topic.indexOf('#') != -1)
+    if (strchr(topic, '#') != nullptr)
     {
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' contains multi-level wildcard '#'.", topic.c_str());
+        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' contains multi-level wildcard '#'.", topic);
         return false;
     }
-    if (topic.indexOf('+') != -1)
+    if (strchr(topic, '+') != nullptr)
     {
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' contains single-level wildcard '+'.", topic.c_str());
+        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' contains single-level wildcard '+'.", topic);
         return false;
     }
 
     return true;
 }
 
-bool ESPAsyncMQTTBroker::publish(const char *topic, const char *payload, bool retained, uint8_t qos)
-{
-    return publish(topic, payload, retained, qos, "");
-}
-
-bool ESPAsyncMQTTBroker::publish(const char *topic, const char *payload, bool retained, uint8_t qos, const String &excludeClientId)
-{
-    if (!topic)
-    {
-        logMessage(DEBUG_ERROR, "Null pointer as topic for C-String Publish");
-        return false;
-    }
-    if (!payload)
-    {
-        logMessage(DEBUG_DEBUG, "Null pointer as payload for C-String Publish, treating as empty string.");
-        return publish(topic, (const uint8_t *)"", 0, retained, qos, excludeClientId);
-    }
-
-    return publish(topic, (const uint8_t *)payload, strlen(payload), retained, qos, excludeClientId);
-}
-
-bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, const char *payload)
-{
-    return publish(topic, payload, retained, qos);
-}
-
-bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId)
+bool ESPAsyncMQTTBroker::publish(const char* topic, const uint8_t* payload, size_t len, bool retained, uint8_t qos, const char* excludeClientId)
 {
     if (!topic)
     {
         logMessage(DEBUG_ERROR, "Null pointer as topic for Publish");
         return false;
     }
-    if (payloadLen > 0 && !payload)
+    if (len > 0 && !payload)
     {
-        logMessage(DEBUG_ERROR, "Null pointer as payload with payloadLen > 0 for Publish");
+        logMessage(DEBUG_ERROR, "Null pointer as payload with len > 0 for Publish");
         return false;
     }
 
@@ -1144,191 +1072,138 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         return false;
     }
 
-    if (payloadLen > MQTT_MAX_PAYLOAD_SIZE)
+    if (len > MQTT_MAX_PAYLOAD_SIZE)
     {
-        logMessage(DEBUG_WARNING, "Payload will be truncated: %u > %u", (unsigned)payloadLen, MQTT_MAX_PAYLOAD_SIZE);
-        payloadLen = MQTT_MAX_PAYLOAD_SIZE;
+        logMessage(DEBUG_WARNING, "Payload will be truncated: %u > %u", (unsigned)len, MQTT_MAX_PAYLOAD_SIZE);
+        len = MQTT_MAX_PAYLOAD_SIZE;
     }
 
-    logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
-    if (!excludeClientId.isEmpty())
+    logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)len, qos, retained ? "Yes" : "No");
+    if (excludeClientId)
     {
-        logMessage(DEBUG_INFO, "   - Excluded client: %s", excludeClientId.c_str());
+        logMessage(DEBUG_INFO, "   - Excluded client: %s", excludeClientId);
     }
-
-    String topicStr = String(topic);
 
     if (retained)
     {
-        retainedMessages.erase(topicStr);
+        auto& vec = retainedMessages;
+        vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const auto& msg) {
+            return strcmp(msg->topic, topic) == 0;
+        }), vec.end());
 
-        if (payloadLen > 0)
+        if (len > 0)
         {
-            auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr, payload, payloadLen, qos));
-            retainedMessages[topicStr] = std::move(msg);
+            auto msg = std::make_unique<RetainedMessage>(topic, payload, len, qos);
+            retainedMessages.push_back(std::move(msg));
         }
     }
 
     uint8_t header = (MQTT_PUBLISH << 4) | (qos << 1) | (retained ? 1 : 0);
 
-    bool messageSent = false;
-    int clientCount = 0;
-    int sentCount = 0;
-
-    size_t currentTopicLen = topicStr.length();
-    size_t remainingLength = 2 + currentTopicLen + payloadLen;
-
+    size_t remainingLength = 2 + topicLen + len;
     if (remainingLength > 127)
     {
-        logMessage(DEBUG_ERROR, "Message too large for simple Remaining Length encoding: %u. Topic: %s", (unsigned)remainingLength, topicStr.c_str());
+        logMessage(DEBUG_ERROR, "Message too large for simple Remaining Length encoding: %u. Topic: %s", (unsigned)remainingLength, topic);
         return false;
     }
 
     size_t packetSize = 1 + 1 + remainingLength;
-    auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-    packet[0] = header;
-    packet[1] = remainingLength;
-    packet[2] = currentTopicLen >> 8;
-    packet[3] = currentTopicLen & 0xFF;
-    memcpy(packet.get() + 4, topicStr.c_str(), currentTopicLen);
-    if (payloadLen > 0)
+    if (packetSize > MQTT_MAX_PACKET_SIZE) {
+        logMessage(DEBUG_ERROR, "Publish packet too large: %d", packetSize);
+        return false;
+    }
+    _packet_buffer[0] = header;
+    _packet_buffer[1] = remainingLength;
+    _packet_buffer[2] = topicLen >> 8;
+    _packet_buffer[3] = topicLen & 0xFF;
+    memcpy(_packet_buffer + 4, topic, topicLen);
+    if (len > 0)
     {
-        memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
+        memcpy(_packet_buffer + 4 + topicLen, payload, len);
     }
 
-    for (auto it = clients.begin(); it != clients.end(); ++it)
+    bool messageSent = false;
+    int clientCount = 0;
+    int sentCount = 0;
+
+    for (auto const& [asyncClient, mqttClient] : clients)
     {
-        auto& c = it->second;
-        if (!c->connected)
-            continue;
+        if (!mqttClient->connected) continue;
 
         clientCount++;
-        bool sentToThisClient = false;
 
-        bool isOriginalPublisherAndShouldBeSkipped = false;
-        if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
-        {
-            bool foundNonNoLocalMatch = false;
-            bool hasAnyMatchingSubscription = false;
-            for (auto &subCheck : c->subscriptions)
-            {
-                if (topicMatches(subCheck.filter, topicStr))
-                {
-                    hasAnyMatchingSubscription = true;
-                    if (!subCheck.noLocal)
-                    {
-                        foundNonNoLocalMatch = true;
-                        break;
-                    }
+        // Check if the client is the original publisher and all its matching subscriptions are "noLocal"
+        if (excludeClientId && strcmp(mqttClient->clientId, excludeClientId) == 0) {
+            bool shouldSkip = true;
+            for (const auto& sub : mqttClient->subscriptions) {
+                if (topicMatches(sub.filter, topic) && !sub.noLocal) {
+                    shouldSkip = false;
+                    break;
                 }
             }
-            if (hasAnyMatchingSubscription && !foundNonNoLocalMatch)
-            {
-                isOriginalPublisherAndShouldBeSkipped = true;
-                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped (all matching subscriptions have noLocal=true)", c->clientId.c_str());
+            if (shouldSkip) {
+                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped (all matching subscriptions have noLocal=true)", mqttClient->clientId);
+                continue;
             }
         }
 
-        if (isOriginalPublisherAndShouldBeSkipped)
+        for (const auto& sub : mqttClient->subscriptions)
         {
-            continue;
-        }
-
-        for (auto &sub : c->subscriptions)
-        {
-            logMessage(DEBUG_DEBUG, "Checking topic match for client %s: Subscription='%s', Incoming='%s'", c->clientId.c_str(), sub.filter.c_str(), topicStr.c_str());
-
-            bool matched = topicMatches(sub.filter, topicStr);
-            logMessage(DEBUG_DEBUG, "  - Match: %s", matched ? "Yes" : "No");
-
-            if (matched)
+            if (topicMatches(sub.filter, topic))
             {
-                logMessage(DEBUG_DEBUG, "Sending packet to Client ID: %s (Length: %u)", c->clientId.c_str(), (unsigned)packetSize);
-
-                bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
-
-                if (writeSuccess)
+                logMessage(DEBUG_DEBUG, "Sending packet to Client ID: %s (Length: %u)", mqttClient->clientId, (unsigned)packetSize);
+                if (mqttClient->client->write((const char*)_packet_buffer, packetSize))
                 {
                     sentCount++;
-                    sentToThisClient = true;
                     messageSent = true;
                 }
-
-                logMessage(DEBUG_DEBUG, "  - Send %s", writeSuccess ? "successful" : "failed");
-
-                break;
+                else
+                {
+                    logMessage(DEBUG_WARNING, "  - Send failed to client %s", mqttClient->clientId);
+                }
+                break; // Message sent, move to next client
             }
-        }
-
-        if (!sentToThisClient && !isOriginalPublisherAndShouldBeSkipped)
-        {
-            logMessage(DEBUG_DEBUG, "  - Client %s has no matching subscriptions for topic %s", c->clientId.c_str(), topicStr.c_str());
         }
     }
 
     logMessage(DEBUG_INFO, "📊 Message sent to %d of %d connected clients", sentCount, clientCount);
-
     return messageSent;
 }
 
-bool ESPAsyncMQTTBroker::isValidTopicFilter(const String &filter)
+bool ESPAsyncMQTTBroker::isValidTopicFilter(const char* filter)
 {
-    if (filter.isEmpty())
+    if (filter == nullptr || filter[0] == '\0')
     {
         logMessage(DEBUG_WARNING, "Invalid topic filter: Filter is empty.");
         return false;
     }
 
-    if (filter.length() > 65535)
+    if (strlen(filter) > 65535)
     {
         logMessage(DEBUG_WARNING, "Invalid topic filter: Filter exceeds 65535 bytes.");
         return false;
     }
 
-    std::vector<String> levels;
-    int start = 0;
-    int pos;
-    while ((pos = filter.indexOf('/', start)) != -1)
-    {
-        levels.push_back(filter.substring(start, pos));
-        start = pos + 1;
-    }
-    levels.push_back(filter.substring(start));
+    const char* current = filter;
+    while (*current) {
+        const char* next_slash = strchr(current, '/');
+        const char* level_end = next_slash ? next_slash : current + strlen(current);
 
-    if (levels.empty() && !filter.isEmpty())
-    {
-    }
-    else if (levels.empty() && filter.length() > 0)
-    {
-        logMessage(DEBUG_WARNING, "Invalid topic filter: Could not split levels for non-empty filter '%s'.", filter.c_str());
-        return false;
-    }
-
-    for (size_t i = 0; i < levels.size(); ++i)
-    {
-        const String &level = levels[i];
-
-        if (level.indexOf('#') != -1)
-        {
-            if (level.length() > 1)
-            {
-                logMessage(DEBUG_WARNING, "Invalid topic filter: '#' cannot be part of a level (Level: '%s', Filter: '%s').", level.c_str(), filter.c_str());
-                return false;
-            }
-            if (i != levels.size() - 1)
-            {
-                logMessage(DEBUG_WARNING, "Invalid topic filter: '#' must be the last level (Filter: '%s').", filter.c_str());
-                return false;
+        if (strchr(current, '#') != nullptr) {
+            if (strlen(current) > 1 || *(current+1) != '\0') {
+                 logMessage(DEBUG_WARNING, "Invalid topic filter: '#' must be the last level (Filter: '%s').", filter);
+                 return false;
             }
         }
-        else if (level.indexOf('+') != -1)
-        {
-            if (level.length() > 1)
-            {
-                logMessage(DEBUG_WARNING, "Invalid topic filter: '+' cannot be part of a level (Level: '%s', Filter: '%s').", level.c_str(), filter.c_str());
+        if (strchr(current, '+') != nullptr) {
+             if (level_end - current > 1) {
+                logMessage(DEBUG_WARNING, "Invalid topic filter: '+' cannot be part of a level (Filter: '%s').", filter);
                 return false;
-            }
+             }
         }
+
+        if (!next_slash) break;
+        current = next_slash + 1;
     }
 
     return true;
