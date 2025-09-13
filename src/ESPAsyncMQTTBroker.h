@@ -6,7 +6,6 @@
 #include <AsyncTCP.h>
 #include <vector>
 #include <map>
-#include <vector>
 #include <memory>
 #include <functional>
 #include "esp_timer.h"
@@ -35,11 +34,8 @@
 #define MQTT_PROTOCOL_LEVEL 4 // MQTT 3.1.1
 #define MQTT_PROTOCOL_LEVEL_5 5 // MQTT 5.0
 #define MQTT_MAX_PACKET_SIZE 1024
-#define MQTT_MAX_TOPIC_SIZE 128     // Maximale Größe für Topic
-#define MQTT_MAX_PAYLOAD_SIZE 512   // Maximale Größe für Payload
-#define MQTT_MAX_CLIENT_ID_SIZE 64  // Maximale Größe für Client ID
-#define MQTT_MAX_USERNAME_SIZE 32   // Maximale Größe für Username
-#define MQTT_MAX_PASSWORD_SIZE 32   // Maximale Größe für Password
+#define MQTT_MAX_TOPIC_SIZE 256   // Maximale Größe für Topic
+#define MQTT_MAX_PAYLOAD_SIZE 768 // Maximale Größe für Payload
 
 // Eigene Implementation von std::make_unique (ab C++14 Standard)
 #if __cplusplus < 201402L
@@ -76,8 +72,9 @@ enum DebugLevel
  */
 struct Subscription
 {
-    char filter[MQTT_MAX_TOPIC_SIZE + 1];    ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
+    String filter;    ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
     bool noLocal;     ///< MQTT 5.0 noLocal-Flag: Bei true erhält der Client keine selbst veröffentlichten Nachrichten
+    // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 
 /**
@@ -86,7 +83,7 @@ struct Subscription
 struct MQTTClient
 {
     AsyncClient *client;
-    char clientId[MQTT_MAX_CLIENT_ID_SIZE + 1];
+    String clientId;
     bool connected;
     uint32_t lastActivity;
     uint16_t keepAlive;
@@ -95,7 +92,8 @@ struct MQTTClient
     uint8_t protocolVersion;
     bool hasWill;
     bool gracefulDisconnect;
-    char willTopic[MQTT_MAX_TOPIC_SIZE + 1];
+    String willTopic;
+    String willMessage;
     uint8_t willQos;
     bool willRetain;
     std::unique_ptr<uint8_t[]> willPayload;
@@ -107,20 +105,21 @@ struct MQTTClient
  */
 struct RetainedMessage
 {
-    char topic[MQTT_MAX_TOPIC_SIZE + 1];
+    String topic;
     std::unique_ptr<uint8_t[]> payload;
     size_t length;
     uint8_t qos;
 
-    RetainedMessage(const char* t, const uint8_t* p, size_t len, uint8_t q)
-        : length(len), qos(q) {
-        strncpy(topic, t, MQTT_MAX_TOPIC_SIZE);
-        topic[MQTT_MAX_TOPIC_SIZE] = '\0';
+    RetainedMessage(const String& t, const uint8_t* p, size_t len, uint8_t q)
+        : topic(t), length(len), qos(q) {
         if (len > 0 && p != nullptr) {
-            size_t lenToCopy = (len > MQTT_MAX_PAYLOAD_SIZE) ? MQTT_MAX_PAYLOAD_SIZE : len;
-            payload.reset(new uint8_t[lenToCopy]);
-            memcpy(payload.get(), p, lenToCopy);
-            length = lenToCopy;
+            payload.reset(new uint8_t[len]);
+            if (len <= MQTT_MAX_PAYLOAD_SIZE) {
+                memcpy(payload.get(), p, len);
+            } else {
+                memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
+                length = MQTT_MAX_PAYLOAD_SIZE;
+            }
         }
     }
 };
@@ -130,58 +129,46 @@ struct RetainedMessage
  */
 struct ESPAsyncMQTTBrokerConfig
 {
-    char username[MQTT_MAX_USERNAME_SIZE + 1] = {0};
-    char password[MQTT_MAX_PASSWORD_SIZE + 1] = {0};
+    String username = "";
+    String password = "";
     bool ignoreLoopDeliver = false;
     bool log = true;
 };
 
 struct IncomingQoS2Message
 {
-    char topic[MQTT_MAX_TOPIC_SIZE + 1];
+    String topic;
     std::unique_ptr<uint8_t[]> payload;
     size_t length;
     size_t payload_len;
     bool retained;
-    char senderClientId[MQTT_MAX_CLIENT_ID_SIZE + 1];
-    char originalClientId[MQTT_MAX_CLIENT_ID_SIZE + 1];
+    String senderClientId;
+    String originalClientId;
 
-    IncomingQoS2Message() : length(0), payload_len(0), retained(false) {
-        topic[0] = '\0';
-        senderClientId[0] = '\0';
-        originalClientId[0] = '\0';
-    }
+    IncomingQoS2Message() : length(0), payload_len(0), retained(false) {}
 
-    IncomingQoS2Message(const char* t, const uint8_t* p, size_t len, bool ret, const char* clientId)
-        : length(len), payload_len(len), retained(ret) {
-        strncpy(topic, t, MQTT_MAX_TOPIC_SIZE);
-        topic[MQTT_MAX_TOPIC_SIZE] = '\0';
-        strncpy(senderClientId, clientId, MQTT_MAX_CLIENT_ID_SIZE);
-        senderClientId[MQTT_MAX_CLIENT_ID_SIZE] = '\0';
-        strncpy(originalClientId, clientId, MQTT_MAX_CLIENT_ID_SIZE);
-        originalClientId[MQTT_MAX_CLIENT_ID_SIZE] = '\0';
-
+    IncomingQoS2Message(const String& t, const uint8_t* p, size_t len, bool ret, const String& clientId)
+        : topic(t), length(len), payload_len(len), retained(ret), senderClientId(clientId), originalClientId(clientId) {
         if (len > 0 && p != nullptr) {
-            size_t lenToCopy = (len > MQTT_MAX_PAYLOAD_SIZE) ? MQTT_MAX_PAYLOAD_SIZE : len;
-            payload.reset(new uint8_t[lenToCopy]);
-            memcpy(payload.get(), p, lenToCopy);
-            length = payload_len = lenToCopy;
+            payload.reset(new uint8_t[len]);
+            if (len <= MQTT_MAX_PAYLOAD_SIZE) {
+                memcpy(payload.get(), p, len);
+            } else {
+                memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
+                length = MQTT_MAX_PAYLOAD_SIZE;
+                payload_len = MQTT_MAX_PAYLOAD_SIZE;
+            }
         }
     }
 };
 
-struct ClientInfo {
-    char clientId[MQTT_MAX_CLIENT_ID_SIZE + 1];
-    char ip[16]; // "255.255.255.255"
-};
-
-typedef std::function<void(const char* clientId, const char* clientIp)> ClientCallback;
-typedef std::function<void(const char* clientId, const char* topic, const uint8_t* payload, size_t len)> MessageCallback;
-typedef std::function<void(const char* clientId)> ClientDisconnectCallback;
-typedef std::function<void(const char* clientId, int errorCode, const char* errorMessage)> ErrorCallback;
-typedef std::function<void(const char* clientId, const char* topic)> SubscribeCallback;
-typedef std::function<void(const char* clientId, const char* topic)> UnsubscribeCallback;
-typedef std::function<void(DebugLevel level, const char* message)> LoggingCallback;
+typedef std::function<void(String clientId, String clientIp)> ClientCallback;
+typedef std::function<void(String clientId, String topic, String message)> MessageCallback;
+typedef std::function<void(String clientId)> ClientDisconnectCallback;
+typedef std::function<void(String clientId, int errorCode, const String &errorMessage)> ErrorCallback;
+typedef std::function<void(String clientId, const String &topic)> SubscribeCallback;
+typedef std::function<void(String clientId, const String &topic)> UnsubscribeCallback;
+typedef std::function<void(DebugLevel level, const String &message)> LoggingCallback;
 
 class ESPAsyncMQTTBroker
 {
@@ -190,7 +177,9 @@ public:
     ~ESPAsyncMQTTBroker();
     void begin();
     void stop();
-    bool publish(const char* topic, const uint8_t* payload, size_t len, bool retained = false, uint8_t qos = 0, const char* excludeClientId = nullptr);
+    bool publish(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
+    bool publish(const char* topic, const char* payload, bool retained, uint8_t qos, const String& excludeClientId);
+    bool publish(const char* topic, uint8_t qos, bool retained, const char* payload);
     void setConfig(const ESPAsyncMQTTBrokerConfig &config);
     void setDebugLevel(DebugLevel level) { debugLevel = level; }
     void setLoggingCallback(LoggingCallback callback) { loggingCallback = callback; }
@@ -200,20 +189,19 @@ public:
     void onError(ErrorCallback callback) { errorCallback = callback; }
     void onSubscribe(SubscribeCallback callback) { subscribeCallback = callback; }
     void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
-    const std::vector<ClientInfo>& getConnectedClientsInfo() const { return connectedClientsInfo; }
+    std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
 
 private:
-    uint8_t _packet_buffer[MQTT_MAX_PACKET_SIZE];
     uint16_t port;
     std::unique_ptr<AsyncServer> server;
     std::map<AsyncClient *, std::unique_ptr<MQTTClient>> clients;
-    std::vector<std::unique_ptr<RetainedMessage>> retainedMessages;
-    std::vector<std::unique_ptr<MQTTClient>> persistentSessions;
+    std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
+    std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
     std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages;
     ESPAsyncMQTTBrokerConfig brokerConfig;
     DebugLevel debugLevel = DEBUG_INFO;
     esp_timer_handle_t timeoutTimer = nullptr;
-    std::vector<ClientInfo> connectedClientsInfo;
+    std::map<String, String> connectedClientsInfo;
     ClientCallback clientConnectCallback = nullptr;
     ClientDisconnectCallback clientDisconnectCallback = nullptr;
     MessageCallback messageCallback = nullptr;
@@ -232,14 +220,16 @@ private:
     void handlePubRel(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubComp(MQTTClient *client, uint8_t *data, size_t len);
     void processPacket(MQTTClient *client, uint8_t *data, size_t len);
-    bool topicMatches(const char* filter, const char* topic);
+    bool topicMatches(const Subscription &subscription, const String &topic);
+    bool topicMatches(const String &subscription, const String &topic);
     void sendRetainedMessages(MQTTClient *client);
-    bool authenticateClient(const char* username, const char* password);
+    bool authenticateClient(const String &username, const String &password);
     void onClient(AsyncClient *client);
     void checkTimeouts();
     void logMessage(DebugLevel level, const char* format, ...);
-    bool isValidPublishTopic(const char* topic);
-    bool isValidTopicFilter(const char* filter);
+    bool isValidPublishTopic(const String &topic);
+    bool isValidTopicFilter(const String &filter);
+    bool publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos, const String& excludeClientId);
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
