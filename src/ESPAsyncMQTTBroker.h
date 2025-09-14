@@ -98,6 +98,35 @@ struct MQTTClient
     bool willRetain;
     std::unique_ptr<uint8_t[]> willPayload;
     size_t willPayloadLen;
+
+    // For QoS 1/2 messages sent *to* this client
+    std::map<uint16_t, struct OutgoingQoSMessage> outgoingMessages;
+};
+
+/**
+ * State of an outgoing QoS message
+ */
+enum class OutgoingQoSState {
+    AwaitingPuback,  // For QoS 1
+    AwaitingPubrec,  // For QoS 2
+    AwaitingPubcomp  // For QoS 2
+};
+
+/**
+ * Represents a QoS 1 or 2 message being sent to a subscriber
+ */
+struct OutgoingQoSMessage {
+    uint8_t qos;
+    bool retain;
+    String topic;
+    std::unique_ptr<uint8_t[]> payload;
+    size_t payloadLen;
+    uint32_t sentTime;
+    uint8_t retryCount;
+    OutgoingQoSState state;
+    uint16_t packetId;
+
+    OutgoingQoSMessage() : qos(0), retain(false), payloadLen(0), sentTime(0), retryCount(0), state(OutgoingQoSState::AwaitingPuback), packetId(0) {}
 };
 
 /**
@@ -202,6 +231,10 @@ private:
     DebugLevel debugLevel = DEBUG_INFO;
     esp_timer_handle_t timeoutTimer = nullptr;
     std::map<String, String> connectedClientsInfo;
+    uint16_t nextPacketId = 1;
+
+    uint16_t getNextPacketId();
+
     ClientCallback clientConnectCallback = nullptr;
     ClientDisconnectCallback clientDisconnectCallback = nullptr;
     MessageCallback messageCallback = nullptr;
@@ -216,6 +249,7 @@ private:
     void handleUnsubscribe(MQTTClient *client, uint8_t *data, size_t len);
     void handlePingReq(MQTTClient *client);
     void handleDisconnect(MQTTClient *client);
+    void handlePuback(MQTTClient* client, uint8_t* data, size_t len);
     void handlePubRec(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubRel(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubComp(MQTTClient *client, uint8_t *data, size_t len);
