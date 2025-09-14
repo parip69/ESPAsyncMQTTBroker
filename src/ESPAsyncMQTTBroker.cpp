@@ -1,4 +1,4 @@
-// @version: 1.5.1
+// @version: 1.5.2
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
 
