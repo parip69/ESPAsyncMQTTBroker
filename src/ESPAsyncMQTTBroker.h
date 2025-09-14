@@ -1,4 +1,4 @@
-// @version: 1.5.1
+// @version: 1.5.2
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
