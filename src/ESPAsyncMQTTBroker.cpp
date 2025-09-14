@@ -2,6 +2,13 @@
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
 
+uint16_t ESPAsyncMQTTBroker::getNextPacketId() {
+    if (nextPacketId == 0) {
+        nextPacketId = 1;
+    }
+    return nextPacketId++;
+}
+
 // Zentrale Logging-Funktion
 void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 {
@@ -93,26 +100,68 @@ void ESPAsyncMQTTBroker::stop()
 void ESPAsyncMQTTBroker::checkTimeouts()
 {
     uint32_t now = millis();
-    for (auto it = clients.begin(); it != clients.end();)
-    {
+    const uint32_t retryTimeout = 5000; // 5 seconds
+    const uint8_t maxRetries = 3;
+
+    for (auto it = clients.begin(); it != clients.end();) {
         auto &mqttClient = it->second;
-        if (mqttClient->connected && mqttClient->keepAlive > 0)
-        {
-            if (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL)
-            {
+
+        // Check for client keep-alive timeout
+        if (mqttClient->connected && mqttClient->keepAlive > 0) {
+            if (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL) {
                 logMessage(DEBUG_INFO, "Client ⏰  inactive, disconnecting.", mqttClient->clientId.c_str());
-                mqttClient->client->close(); // This will trigger onDisconnect and remove the client
+                mqttClient->client->close();
                 ++it;
-            }
-            else
-            {
-                ++it;
+                continue;
             }
         }
-        else
-        {
-            ++it;
+
+        // Check for outgoing QoS message timeouts
+        for (auto msgIt = mqttClient->outgoingMessages.begin(); msgIt != mqttClient->outgoingMessages.end(); ) {
+            auto& outMsg = msgIt->second;
+            if (now - outMsg.sentTime > retryTimeout) {
+                if (outMsg.retryCount >= maxRetries) {
+                    logMessage(DEBUG_ERROR, "QoS %d message for client '%s' (packet ID %u) timed out after %d retries. Discarding.", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, maxRetries);
+                    msgIt = mqttClient->outgoingMessages.erase(msgIt);
+                    continue;
+                }
+
+                logMessage(DEBUG_INFO, "QoS %d message for client '%s' (packet ID %u) timed out. Retrying (%d/%d)...", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, outMsg.retryCount + 1, maxRetries);
+
+                outMsg.retryCount++;
+                outMsg.sentTime = now;
+
+                if (outMsg.state == OutgoingQoSState::AwaitingPuback || outMsg.state == OutgoingQoSState::AwaitingPubrec) {
+                    // Resend PUBLISH with DUP flag
+                    size_t topicLen = outMsg.topic.length();
+                    size_t packet_id_len = 2;
+                    size_t remainingLength = 2 + topicLen + packet_id_len + outMsg.payloadLen;
+                    size_t packetSize = 1 + 1 + remainingLength; // simple remaining length for now
+                    auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
+
+                    packet[0] = (MQTT_PUBLISH << 4) | (outMsg.qos << 1) | (outMsg.retain ? 1 : 0) | 0x08; // Set DUP flag
+                    packet[1] = remainingLength;
+                    packet[2] = topicLen >> 8;
+                    packet[3] = topicLen & 0xFF;
+                    memcpy(packet.get() + 4, outMsg.topic.c_str(), topicLen);
+                    packet[4 + topicLen] = outMsg.packetId >> 8;
+                    packet[5 + topicLen] = outMsg.packetId & 0xFF;
+                    if (outMsg.payloadLen > 0) {
+                        memcpy(packet.get() + 6 + topicLen, outMsg.payload.get(), outMsg.payloadLen);
+                    }
+                    mqttClient->client->write((const char*)packet.get(), packetSize);
+
+                } else if (outMsg.state == OutgoingQoSState::AwaitingPubcomp) {
+                    // Resend PUBREL
+                    uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(outMsg.packetId >> 8), (uint8_t)(outMsg.packetId & 0xFF)};
+                    mqttClient->client->write((const char *)pubrel, sizeof(pubrel));
+                }
+                ++msgIt;
+            } else {
+                ++msgIt;
+            }
         }
+        ++it;
     }
 }
 
@@ -253,6 +302,7 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
         handlePublish(client, data + idx, value, header);
         break;
     case MQTT_PUBACK:
+        handlePuback(client, data + idx, value);
         break;
     case MQTT_SUBSCRIBE:
         handleSubscribe(client, data + idx, value);
@@ -854,17 +904,54 @@ void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
     }
 }
 
+void ESPAsyncMQTTBroker::handlePuback(MQTTClient* client, uint8_t* data, size_t len)
+{
+    if (len < 2) {
+        logMessage(DEBUG_ERROR, "Puback packet too short");
+        return;
+    }
+    uint16_t packetId = (data[0] << 8) | data[1];
+
+    auto it = client->outgoingMessages.find(packetId);
+    if (it != client->outgoingMessages.end()) {
+        if (it->second.qos == 1) {
+            logMessage(DEBUG_DEBUG, "PUBACK from subscriber '%s' for packet ID %u received.", client->clientId.c_str(), packetId);
+            client->outgoingMessages.erase(it);
+        } else {
+            logMessage(DEBUG_WARNING, "Received PUBACK for QoS 2 message from '%s' (packet ID %u). This is unexpected.", client->clientId.c_str(), packetId);
+        }
+    } else {
+        logMessage(DEBUG_DEBUG, "Spurious PUBACK from '%s' for packet ID %u received.", client->clientId.c_str(), packetId);
+    }
+}
+
 void ESPAsyncMQTTBroker::handlePubRec(MQTTClient *client, uint8_t *data, size_t len)
 {
-    if (len < 2)
-    {
+    if (len < 2) {
         logMessage(DEBUG_ERROR, "PubRec packet too short");
         return;
     }
     uint16_t packetId = (data[0] << 8) | data[1];
+
+    // Check if this is a PUBREC from a subscriber
+    auto it = client->outgoingMessages.find(packetId);
+    if (it != client->outgoingMessages.end() && it->second.state == OutgoingQoSState::AwaitingPubrec) {
+        logMessage(DEBUG_DEBUG, "PUBREC from subscriber '%s' for packet ID %u received.", client->clientId.c_str(), packetId);
+
+        // Update state and send PUBREL
+        it->second.state = OutgoingQoSState::AwaitingPubcomp;
+        it->second.sentTime = millis();
+
+        uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(packetId >> 8), (uint8_t)(packetId & 0xFF)};
+        client->client->write((const char *)pubrel, sizeof(pubrel));
+        logMessage(DEBUG_DEBUG, "Sending PUBREL to subscriber '%s' for packet ID %u.", client->clientId.c_str(), packetId);
+        return;
+    }
+
+    // Original logic for PUBREC from a publisher
     uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
     client->client->write((const char *)pubrel, sizeof(pubrel));
-    logMessage(DEBUG_DEBUG, "PUBREC for packet ID %u processed", packetId);
+    logMessage(DEBUG_DEBUG, "PUBREC for publisher packet ID %u processed", packetId);
 }
 
 void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t len)
@@ -912,11 +999,22 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
 void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *client, uint8_t *data, size_t len)
 {
-    if (len >= 2)
-    {
-        uint16_t packetId = (data[0] << 8) | data[1];
-        logMessage(DEBUG_DEBUG, "PUBCOMP for packet ID %u received", packetId);
+    if (len < 2) {
+        logMessage(DEBUG_ERROR, "PubComp packet too short");
+        return;
     }
+    uint16_t packetId = (data[0] << 8) | data[1];
+
+    // Check if this is a PUBCOMP from a subscriber
+    auto it = client->outgoingMessages.find(packetId);
+    if (it != client->outgoingMessages.end() && it->second.state == OutgoingQoSState::AwaitingPubcomp) {
+        logMessage(DEBUG_DEBUG, "PUBCOMP from subscriber '%s' for packet ID %u received. QoS 2 flow complete.", client->clientId.c_str(), packetId);
+        client->outgoingMessages.erase(it);
+        return;
+    }
+
+    // Original logic for PUBCOMP from a publisher
+    logMessage(DEBUG_DEBUG, "PUBCOMP for publisher packet ID %u received", packetId);
 }
 
 bool ESPAsyncMQTTBroker::topicMatches(const Subscription &subscription, const String &topic)
@@ -1126,148 +1224,155 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, 
 
 bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId)
 {
-    if (!topic)
-    {
+    if (!topic) {
         logMessage(DEBUG_ERROR, "Null pointer as topic for Publish");
         return false;
     }
-    if (payloadLen > 0 && !payload)
-    {
+    if (payloadLen > 0 && !payload) {
         logMessage(DEBUG_ERROR, "Null pointer as payload with payloadLen > 0 for Publish");
         return false;
     }
 
     size_t topicLen = strlen(topic);
-    if (topicLen > MQTT_MAX_TOPIC_SIZE)
-    {
+    if (topicLen > MQTT_MAX_TOPIC_SIZE) {
         logMessage(DEBUG_ERROR, "Topic too long: %u > %u", (unsigned)topicLen, MQTT_MAX_TOPIC_SIZE);
         return false;
     }
 
-    if (payloadLen > MQTT_MAX_PAYLOAD_SIZE)
-    {
+    if (payloadLen > MQTT_MAX_PAYLOAD_SIZE) {
         logMessage(DEBUG_WARNING, "Payload will be truncated: %u > %u", (unsigned)payloadLen, MQTT_MAX_PAYLOAD_SIZE);
         payloadLen = MQTT_MAX_PAYLOAD_SIZE;
     }
 
     logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
-    if (!excludeClientId.isEmpty())
-    {
+    if (!excludeClientId.isEmpty()) {
         logMessage(DEBUG_INFO, "   - Excluded client: %s", excludeClientId.c_str());
     }
 
     String topicStr = String(topic);
 
-    if (retained)
-    {
+    if (retained) {
         retainedMessages.erase(topicStr);
-
-        if (payloadLen > 0)
-        {
-            auto msg = std::unique_ptr<RetainedMessage>(new RetainedMessage(topicStr, payload, payloadLen, qos));
+        if (payloadLen > 0) {
+            auto msg = std::make_unique<RetainedMessage>(topicStr, payload, payloadLen, qos);
             retainedMessages[topicStr] = std::move(msg);
         }
     }
-
-    uint8_t header = (MQTT_PUBLISH << 4) | (qos << 1) | (retained ? 1 : 0);
 
     bool messageSent = false;
     int clientCount = 0;
     int sentCount = 0;
 
-    size_t currentTopicLen = topicStr.length();
-    size_t remainingLength = 2 + currentTopicLen + payloadLen;
-
-    if (remainingLength > 127)
-    {
-        logMessage(DEBUG_ERROR, "Message too large for simple Remaining Length encoding: %u. Topic: %s", (unsigned)remainingLength, topicStr.c_str());
-        return false;
-    }
-
-    size_t packetSize = 1 + 1 + remainingLength;
-    auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-    packet[0] = header;
-    packet[1] = remainingLength;
-    packet[2] = currentTopicLen >> 8;
-    packet[3] = currentTopicLen & 0xFF;
-    memcpy(packet.get() + 4, topicStr.c_str(), currentTopicLen);
-    if (payloadLen > 0)
-    {
-        memcpy(packet.get() + 4 + currentTopicLen, payload, payloadLen);
-    }
-
-    for (auto it = clients.begin(); it != clients.end(); ++it)
-    {
-        auto& c = it->second;
-        if (!c->connected)
-            continue;
+    for (auto& clientEntry : clients) {
+        auto& c = clientEntry.second;
+        if (!c->connected) continue;
 
         clientCount++;
-        bool sentToThisClient = false;
 
         bool isOriginalPublisherAndShouldBeSkipped = false;
-        if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
-        {
-            bool foundNonNoLocalMatch = false;
-            bool hasAnyMatchingSubscription = false;
-            for (auto &subCheck : c->subscriptions)
-            {
-                if (topicMatches(subCheck.filter, topicStr))
-                {
-                    hasAnyMatchingSubscription = true;
-                    if (!subCheck.noLocal)
-                    {
-                        foundNonNoLocalMatch = true;
+        if (!excludeClientId.isEmpty() && c->clientId == excludeClientId) {
+            // Check if all matching subscriptions have noLocal=true
+            bool hasMatchingSub = false;
+            bool canReceive = false;
+            for (const auto& sub : c->subscriptions) {
+                if (topicMatches(sub, topicStr)) {
+                    hasMatchingSub = true;
+                    if (!sub.noLocal) {
+                        canReceive = true;
                         break;
                     }
                 }
             }
-            if (hasAnyMatchingSubscription && !foundNonNoLocalMatch)
-            {
+            if (hasMatchingSub && !canReceive) {
                 isOriginalPublisherAndShouldBeSkipped = true;
-                logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped (all matching subscriptions have noLocal=true)", c->clientId.c_str());
             }
         }
 
-        if (isOriginalPublisherAndShouldBeSkipped)
-        {
+        if (isOriginalPublisherAndShouldBeSkipped) {
+            logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped (all matching subscriptions have noLocal=true)", c->clientId.c_str());
             continue;
         }
 
-        for (auto &sub : c->subscriptions)
-        {
-            logMessage(DEBUG_DEBUG, "Checking topic match for client %s: Subscription='%s', Incoming='%s'", c->clientId.c_str(), sub.filter.c_str(), topicStr.c_str());
+        for (const auto& sub : c->subscriptions) {
+            if (topicMatches(sub, topicStr)) {
+                uint8_t final_qos = qos; // We could downgrade QoS here based on subscription, but for now use original.
 
-            bool matched = topicMatches(sub.filter, topicStr);
-            logMessage(DEBUG_DEBUG, "  - Match: %s", matched ? "Yes" : "No");
+                size_t packet_id_len = (final_qos > 0) ? 2 : 0;
+                size_t remainingLength = 2 + topicLen + packet_id_len + payloadLen;
 
-            if (matched)
-            {
-                logMessage(DEBUG_DEBUG, "Sending packet to Client ID: %s (Length: %u)", c->clientId.c_str(), (unsigned)packetSize);
-
-                bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
-
-                if (writeSuccess)
-                {
-                    sentCount++;
-                    sentToThisClient = true;
-                    messageSent = true;
+                // Basic check for remaining length encoding
+                if (remainingLength > 2097151) { // Max for 3 bytes
+                    logMessage(DEBUG_ERROR, "Message too large to encode. Topic: %s", topicStr.c_str());
+                    continue; // Skip this client
                 }
 
-                logMessage(DEBUG_DEBUG, "  - Send %s", writeSuccess ? "successful" : "failed");
+                size_t header_len = 1;
+                if (remainingLength <= 127) header_len += 1;
+                else if (remainingLength <= 16383) header_len += 2;
+                else header_len += 3;
 
-                break;
+                size_t packetSize = header_len + remainingLength;
+                auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
+
+                uint8_t* ptr = packet.get();
+                *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1) | (retained ? 1 : 0);
+
+                // Encode remaining length
+                size_t rem_len = remainingLength;
+                do {
+                    uint8_t byte = rem_len % 128;
+                    rem_len /= 128;
+                    if (rem_len > 0) {
+                        byte |= 128;
+                    }
+                    *ptr++ = byte;
+                } while (rem_len > 0);
+
+                *ptr++ = topicLen >> 8;
+                *ptr++ = topicLen & 0xFF;
+                memcpy(ptr, topicStr.c_str(), topicLen);
+                ptr += topicLen;
+
+                if (final_qos > 0) {
+                    uint16_t packetId = getNextPacketId();
+                    *ptr++ = packetId >> 8;
+                    *ptr++ = packetId & 0xFF;
+
+                    auto outMsg = std::make_unique<OutgoingQoSMessage>();
+                    outMsg->qos = final_qos;
+                    outMsg->retain = retained;
+                    outMsg->topic = topicStr;
+                    outMsg->payloadLen = payloadLen;
+                    if (payloadLen > 0) {
+                        outMsg->payload = std::unique_ptr<uint8_t[]>(new uint8_t[payloadLen]);
+                        memcpy(outMsg->payload.get(), payload, payloadLen);
+                    }
+                    outMsg->sentTime = millis();
+                    outMsg->retryCount = 0;
+                    outMsg->packetId = packetId;
+                    outMsg->state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
+
+                    c->outgoingMessages[packetId] = std::move(*outMsg);
+                    logMessage(DEBUG_DEBUG, "Storing outgoing QoS %d message for client '%s' (packet ID %u)", final_qos, c->clientId.c_str(), packetId);
+                }
+
+                if (payloadLen > 0) {
+                    memcpy(ptr, payload, payloadLen);
+                }
+
+                bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
+                if (writeSuccess) {
+                    sentCount++;
+                    messageSent = true;
+                }
+                logMessage(DEBUG_DEBUG, "  - Sent PUBLISH to %s (QoS %d), Success: %s", c->clientId.c_str(), final_qos, writeSuccess ? "Yes" : "No");
+
+                break; // Message sent to this client for this topic, move to next client
             }
-        }
-
-        if (!sentToThisClient && !isOriginalPublisherAndShouldBeSkipped)
-        {
-            logMessage(DEBUG_DEBUG, "  - Client %s has no matching subscriptions for topic %s", c->clientId.c_str(), topicStr.c_str());
         }
     }
 
     logMessage(DEBUG_INFO, "📊 Message sent to %d of %d connected clients", sentCount, clientCount);
-
     return messageSent;
 }
 
