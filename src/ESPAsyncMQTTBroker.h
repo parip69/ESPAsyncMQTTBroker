@@ -98,6 +98,9 @@ struct MQTTClient
     bool willRetain;
     std::unique_ptr<uint8_t[]> willPayload;
     size_t willPayloadLen;
+
+    // Callback for internal clients
+    std::function<void(const String& topic, const String& payload)> internalMessageCallback = nullptr;
 };
 
 /**
@@ -191,10 +194,18 @@ public:
     void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
     std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
 
+    // --- Internal methods for loopback/compat client ---
+    bool _internalConnect(const String& clientId, const String& username, const String& password, bool cleanSession, uint16_t keepAlive, std::function<void(const String&, const String&)> messageCallback);
+    void _internalDisconnect(const String& clientId);
+    bool _internalSubscribe(const String& clientId, const String& topic, uint8_t qos);
+    bool _internalUnsubscribe(const String& clientId, const String& topic);
+
+
 private:
     uint16_t port;
     std::unique_ptr<AsyncServer> server;
     std::map<AsyncClient *, std::unique_ptr<MQTTClient>> clients;
+    std::map<String, std::unique_ptr<MQTTClient>> internalClients;
     std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
     std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages;

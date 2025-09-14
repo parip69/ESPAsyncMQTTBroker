@@ -2,6 +2,37 @@
 #include "ESPAsyncMQTTBroker.h"
 #include <cstdarg>
 
+#ifdef MQTT_TEST_TRACE
+// Helper to dump packet content for debugging
+void logHexDump(const char* prefix, const uint8_t* data, size_t len) {
+    Serial.printf("[TRACE] %s (%d bytes):\n", prefix, len);
+    char hex_buff[17];
+    char ascii_buff[17];
+    memset(hex_buff, 0, sizeof(hex_buff));
+    memset(ascii_buff, 0, sizeof(ascii_buff));
+
+    for (size_t i = 0; i < len; ++i) {
+        int pos = i % 16;
+        sprintf(hex_buff + pos * 3, "%02X ", data[i]);
+        ascii_buff[pos] = (data[i] >= 32 && data[i] < 127) ? data[i] : '.';
+
+        if (pos == 15) {
+            Serial.printf("  %04X: %s %s\n", (unsigned int)i - 15, hex_buff, ascii_buff);
+            memset(hex_buff, 0, sizeof(hex_buff));
+            memset(ascii_buff, 0, sizeof(ascii_buff));
+        }
+    }
+
+    int last_pos = len % 16;
+    if (last_pos > 0) {
+        for (int i = last_pos; i < 16; ++i) {
+            sprintf(hex_buff + i * 3, "   ");
+        }
+        Serial.printf("  %04X: %s %s\n", (unsigned int)len - last_pos, hex_buff, ascii_buff);
+    }
+}
+#endif
+
 // Zentrale Logging-Funktion
 void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 {
@@ -208,6 +239,9 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
 void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t len)
 {
+#ifdef MQTT_TEST_TRACE
+    logHexDump("Incoming Packet", data, len);
+#endif
     if (len < 2)
     {
         logMessage(DEBUG_ERROR, "Packet too short for header (len=%d)", len);
@@ -1070,6 +1104,88 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
     return true;
 }
 
+// --- Internal methods for loopback/compat client ---
+
+bool ESPAsyncMQTTBroker::_internalConnect(const String& clientId, const String& username, const String& password, bool cleanSession, uint16_t keepAlive, std::function<void(const String&, const String&)> messageCallback) {
+    if (!authenticateClient(username, password)) {
+        logMessage(DEBUG_WARNING, "Internal client '%s' failed authentication.", clientId.c_str());
+        return false;
+    }
+
+    auto mqttClient = std::make_unique<MQTTClient>();
+    mqttClient->client = nullptr; // This is an internal client
+    mqttClient->clientId = clientId;
+    mqttClient->connected = true;
+    mqttClient->lastActivity = millis();
+    mqttClient->keepAlive = keepAlive;
+    mqttClient->cleanSession = cleanSession;
+    mqttClient->internalMessageCallback = messageCallback;
+
+    internalClients[clientId] = std::move(mqttClient);
+
+    if (clientConnectCallback) {
+        clientConnectCallback(clientId, "127.0.0.1");
+    }
+    logMessage(DEBUG_INFO, "Internal client '%s' connected.", clientId.c_str());
+    return true;
+}
+
+void ESPAsyncMQTTBroker::_internalDisconnect(const String& clientId) {
+    auto it = internalClients.find(clientId);
+    if (it != internalClients.end()) {
+        if (clientDisconnectCallback) {
+            clientDisconnectCallback(clientId);
+        }
+        internalClients.erase(it);
+        logMessage(DEBUG_INFO, "Internal client '%s' disconnected.", clientId.c_str());
+    }
+}
+
+bool ESPAsyncMQTTBroker::_internalSubscribe(const String& clientId, const String& topic, uint8_t qos) {
+    auto it = internalClients.find(clientId);
+    if (it == internalClients.end()) {
+        logMessage(DEBUG_WARNING, "Cannot subscribe for unknown internal client '%s'", clientId.c_str());
+        return false;
+    }
+
+    if (!isValidTopicFilter(topic)) {
+        logMessage(DEBUG_WARNING, "Internal client '%s' tried to subscribe to invalid topic filter '%s'", clientId.c_str(), topic.c_str());
+        return false;
+    }
+
+    Subscription sub;
+    sub.filter = topic;
+    sub.noLocal = false; // Default for internal client subscriptions
+    it->second->subscriptions.push_back(sub);
+
+    if (subscribeCallback) {
+        subscribeCallback(clientId, topic);
+    }
+    logMessage(DEBUG_INFO, "Internal client '%s' subscribed to '%s'", clientId.c_str(), topic.c_str());
+    sendRetainedMessages(it->second.get());
+    return true;
+}
+
+bool ESPAsyncMQTTBroker::_internalUnsubscribe(const String& clientId, const String& topic) {
+    auto it = internalClients.find(clientId);
+    if (it == internalClients.end()) {
+        return false;
+    }
+
+    auto& subs = it->second->subscriptions;
+    for (auto sub_it = subs.begin(); sub_it != subs.end(); ++sub_it) {
+        if (sub_it->filter == topic) {
+            subs.erase(sub_it);
+            if (unsubscribeCallback) {
+                unsubscribeCallback(clientId, topic);
+            }
+            logMessage(DEBUG_INFO, "Internal client '%s' unsubscribed from '%s'", clientId.c_str(), topic.c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ESPAsyncMQTTBroker::isValidPublishTopic(const String &topic)
 {
     if (topic.isEmpty())
@@ -1266,7 +1382,31 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         }
     }
 
-    logMessage(DEBUG_INFO, "📊 Message sent to %d of %d connected clients", sentCount, clientCount);
+    // Also check internal clients
+    for (auto const& [clientId, client] : internalClients) {
+        if (!client->connected) continue;
+        if (clientId == excludeClientId) continue; // Basic noLocal for internal clients
+
+        for (auto const& sub : client->subscriptions) {
+            if (topicMatches(sub, topicStr)) {
+                if (client->internalMessageCallback) {
+                    String payloadStr;
+                    if (payloadLen > 0 && payload) {
+                        payloadStr.reserve(payloadLen);
+                        for(size_t i=0; i<payloadLen; ++i) {
+                            payloadStr += (char)payload[i];
+                        }
+                    }
+                    client->internalMessageCallback(topicStr, payloadStr);
+                    messageSent = true;
+                    sentCount++;
+                }
+                break; // Client got the message, no need to check other subscriptions
+            }
+        }
+    }
+
+    logMessage(DEBUG_INFO, "📊 Message sent to %d of %d connected clients", sentCount, clientCount + internalClients.size());
 
     return messageSent;
 }
