@@ -1233,7 +1233,20 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         return false;
     }
 
-    size_t topicLen = strlen(topic);
+    String topicStr(topic);
+
+    // Broker-interne Nachrichten (z.B. LWT, Anwendungslogik) mit einem Präfix versehen,
+    // um sie von weitergeleiteten Client-Nachrichten zu unterscheiden.
+    // Dies geschieht, wenn kein Client explizit ausgeschlossen wird.
+    if (excludeClientId.isEmpty())
+    {
+        String prefixedTopic = String("$BRK/") + topicStr;
+        logMessage(DEBUG_INFO, "Broker-interne Nachricht: Topic wird von '%s' zu '%s' geändert.",
+                   topicStr.c_str(), prefixedTopic.c_str());
+        topicStr = prefixedTopic;
+    }
+
+    size_t topicLen = topicStr.length();
     if (topicLen > MQTT_MAX_TOPIC_SIZE) {
         logMessage(DEBUG_ERROR, "Topic too long: %u > %u", (unsigned)topicLen, MQTT_MAX_TOPIC_SIZE);
         return false;
@@ -1244,12 +1257,10 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         payloadLen = MQTT_MAX_PAYLOAD_SIZE;
     }
 
-    logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
+    logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topicStr.c_str(), (unsigned)payloadLen, qos, retained ? "Yes" : "No");
     if (!excludeClientId.isEmpty()) {
         logMessage(DEBUG_INFO, "   - Excluded client: %s", excludeClientId.c_str());
     }
-
-    String topicStr = String(topic);
 
     if (retained) {
         retainedMessages.erase(topicStr);
