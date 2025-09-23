@@ -1,5 +1,3 @@
-
-
 // @version: 1.9.0
 
 #include "ESPAsyncMQTTBroker.h"
@@ -1036,7 +1034,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
                (unsigned)keepAlive, clientId.c_str());
 
-     // --- Einheitliches AUTH-Log (keine Klartext-Passwörter) ---
+    // --- Einheitliches AUTH-Log (keine Klartext-Passwörter) ---
 
     if (!cfgUserSet)
 
