@@ -1,4 +1,4 @@
-// @version: 1.5.2
+// @version: 1.9.0
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -191,7 +191,7 @@ struct IncomingQoS2Message
     }
 };
 
-typedef std::function<void(String clientId, String clientIp)> ClientCallback;
+typedef std::function<void(String clientId, String clientIp, String username, int passwordLen)> ClientCallback;
 typedef std::function<void(String clientId, String topic, String message)> MessageCallback;
 typedef std::function<void(String clientId)> ClientDisconnectCallback;
 typedef std::function<void(String clientId, int errorCode, const String &errorMessage)> ErrorCallback;
@@ -219,6 +219,7 @@ public:
     void onSubscribe(SubscribeCallback callback) { subscribeCallback = callback; }
     void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
     std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
+    bool setPort(uint16_t newPort);
 
 private:
     uint16_t port;
