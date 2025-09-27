@@ -176,133 +176,79 @@ void ESPAsyncMQTTBroker::stop()
 }
 
 void ESPAsyncMQTTBroker::checkTimeouts()
-
 {
-
     uint32_t now = millis();
-
     const uint32_t retryTimeout = 5000; // 5 seconds
-
     const uint8_t maxRetries = 3;
 
-    for (auto it = clients.begin(); it != clients.end();)
-
+    for (auto it = clients.begin(); it != clients.end(); )
     {
-
         auto &mqttClient = it->second;
 
         // Check for client keep-alive timeout
-
-        if (mqttClient->connected && mqttClient->keepAlive > 0)
-
+        if (mqttClient->connected && mqttClient->keepAlive > 0 &&
+            (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL))
         {
-
-            if (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL)
-
-            {
-
-                logMessage(DEBUG_INFO, "Client ⏰  inactive, disconnecting.", mqttClient->clientId.c_str());
-
-                mqttClient->client->close();
-
-                ++it;
-
-                continue;
-            }
+            logMessage(DEBUG_INFO, "Client ⏰ inactive, disconnecting: %s", mqttClient->clientId.c_str());
+            AsyncClient* clientToClose = mqttClient->client;
+            it++;
+            clientToClose->close();
         }
-
-        // Check for outgoing QoS message timeouts
-
-        for (auto msgIt = mqttClient->outgoingMessages.begin(); msgIt != mqttClient->outgoingMessages.end();)
-
+        else
         {
-
-            auto &outMsg = msgIt->second;
-
-            if (now - outMsg.sentTime > retryTimeout)
-
+            // Check for outgoing QoS message timeouts
+            for (auto msgIt = mqttClient->outgoingMessages.begin(); msgIt != mqttClient->outgoingMessages.end();)
             {
-
-                if (outMsg.retryCount >= maxRetries)
-
+                auto &outMsg = msgIt->second;
+                if (now - outMsg.sentTime > retryTimeout)
                 {
-
-                    logMessage(DEBUG_ERROR, "QoS %d message for client '%s' (packet ID %u) timed out after %d retries. Discarding.", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, maxRetries);
-
-                    msgIt = mqttClient->outgoingMessages.erase(msgIt);
-
-                    continue;
-                }
-
-                logMessage(DEBUG_INFO, "QoS %d message for client '%s' (packet ID %u) timed out. Retrying (%d/%d)...", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, outMsg.retryCount + 1, maxRetries);
-
-                outMsg.retryCount++;
-
-                outMsg.sentTime = now;
-
-                if (outMsg.state == OutgoingQoSState::AwaitingPuback || outMsg.state == OutgoingQoSState::AwaitingPubrec)
-
-                {
-
-                    // Resend PUBLISH with DUP flag
-
-                    size_t topicLen = outMsg.topic.length();
-
-                    size_t packet_id_len = 2;
-
-                    size_t remainingLength = 2 + topicLen + packet_id_len + outMsg.payloadLen;
-
-                    size_t packetSize = 1 + 1 + remainingLength; // simple remaining length for now
-
-                    auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-
-                    packet[0] = (MQTT_PUBLISH << 4) | (outMsg.qos << 1) | (outMsg.retain ? 1 : 0) | 0x08; // Set DUP flag
-
-                    packet[1] = remainingLength;
-
-                    packet[2] = topicLen >> 8;
-
-                    packet[3] = topicLen & 0xFF;
-
-                    memcpy(packet.get() + 4, outMsg.topic.c_str(), topicLen);
-
-                    packet[4 + topicLen] = outMsg.packetId >> 8;
-
-                    packet[5 + topicLen] = outMsg.packetId & 0xFF;
-
-                    if (outMsg.payloadLen > 0)
-
+                    if (outMsg.retryCount >= maxRetries)
                     {
-
-                        memcpy(packet.get() + 6 + topicLen, outMsg.payload.get(), outMsg.payloadLen);
+                        logMessage(DEBUG_ERROR, "QoS %d message for client '%s' (packet ID %u) timed out after %d retries. Discarding.", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, maxRetries);
+                        msgIt = mqttClient->outgoingMessages.erase(msgIt);
                     }
-
-                    mqttClient->client->write((const char *)packet.get(), packetSize);
+                    else
+                    {
+                        logMessage(DEBUG_INFO, "QoS %d message for client '%s' (packet ID %u) timed out. Retrying (%d/%d)...", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, outMsg.retryCount + 1, maxRetries);
+                        outMsg.retryCount++;
+                        outMsg.sentTime = now;
+                        if (outMsg.state == OutgoingQoSState::AwaitingPuback || outMsg.state == OutgoingQoSState::AwaitingPubrec)
+                        {
+                            // Resend PUBLISH with DUP flag
+                            size_t topicLen = outMsg.topic.length();
+                            size_t packet_id_len = 2;
+                            size_t remainingLength = 2 + topicLen + packet_id_len + outMsg.payloadLen;
+                            size_t packetSize = 1 + 1 + remainingLength; // simple remaining length for now
+                            auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
+                            packet[0] = (MQTT_PUBLISH << 4) | (outMsg.qos << 1) | (outMsg.retain ? 1 : 0) | 0x08; // Set DUP flag
+                            packet[1] = remainingLength;
+                            packet[2] = topicLen >> 8;
+                            packet[3] = topicLen & 0xFF;
+                            memcpy(packet.get() + 4, outMsg.topic.c_str(), topicLen);
+                            packet[4 + topicLen] = outMsg.packetId >> 8;
+                            packet[5 + topicLen] = outMsg.packetId & 0xFF;
+                            if (outMsg.payloadLen > 0)
+                            {
+                                memcpy(packet.get() + 6 + topicLen, outMsg.payload.get(), outMsg.payloadLen);
+                            }
+                            mqttClient->client->write((const char *)packet.get(), packetSize);
+                        }
+                        else if (outMsg.state == OutgoingQoSState::AwaitingPubcomp)
+                        {
+                            // Resend PUBREL
+                            uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(outMsg.packetId >> 8), (uint8_t)(outMsg.packetId & 0xFF)};
+                            mqttClient->client->write((const char *)pubrel, sizeof(pubrel));
+                        }
+                        ++msgIt;
+                    }
                 }
-
-                else if (outMsg.state == OutgoingQoSState::AwaitingPubcomp)
-
+                else
                 {
-
-                    // Resend PUBREL
-
-                    uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(outMsg.packetId >> 8), (uint8_t)(outMsg.packetId & 0xFF)};
-
-                    mqttClient->client->write((const char *)pubrel, sizeof(pubrel));
+                    ++msgIt;
                 }
-
-                ++msgIt;
             }
-
-            else
-
-            {
-
-                ++msgIt;
-            }
+            ++it;
         }
-
-        ++it;
     }
 }
 
@@ -707,15 +653,8 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
 }
 
 void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32_t length)
-
 {
-
-    // --- DROP-IN: Neue handleConnect() ---
-
-#include <stdio.h>
-
     logMessage(DEBUG_DEBUG, "🔍 MQTT CONNECT Paket empfangen (len=%u)", length);
-
     if (length < 10)
 
     {
@@ -1701,14 +1640,10 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
 }
 
 void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
-
 {
-
     uint8_t pingresp[] = {0xD0, 0x00};
-
     client->client->write((const char *)pingresp, 2);
-
-    // logMessage(DEBUG_DEBUG, "PING from %s answered", client->clientId.c_str());
+    logMessage(DEBUG_DEBUG, "PING from %s answered", client->clientId.c_str());
 }
 
 void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
