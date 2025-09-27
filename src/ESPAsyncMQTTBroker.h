@@ -101,6 +101,9 @@ struct MQTTClient
 
     // For QoS 1/2 messages sent *to* this client
     std::map<uint16_t, struct OutgoingQoSMessage> outgoingMessages;
+
+    // KeepAlive tracking
+    bool kaSeen;
 };
 
 /**
