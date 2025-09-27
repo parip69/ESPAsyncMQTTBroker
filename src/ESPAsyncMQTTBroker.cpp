@@ -1,4 +1,4 @@
-// @version: 1.9.0
+// @version: 1.9.42
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -203,9 +203,48 @@ void ESPAsyncMQTTBroker::checkTimeouts()
 
                 logMessage(DEBUG_INFO, "Client ⏰  inactive, disconnecting.", mqttClient->clientId.c_str());
 
+                // Handle LWT and session cleanup like unclean disconnect
+
+                if (mqttClient->hasWill && !mqttClient->gracefulDisconnect)
+                {
+
+                    logMessage(DEBUG_INFO, "Unclean disconnect from client %s. Publishing LWT: Topic='%s', QoS=%d, Retain=%s",
+
+                               mqttClient->clientId.c_str(), mqttClient->willTopic.c_str(), mqttClient->willQos, mqttClient->willRetain ? "Yes" : "No");
+
+                    publish(mqttClient->willTopic.c_str(), mqttClient->willPayload.get(), mqttClient->willPayloadLen, mqttClient->willRetain, mqttClient->willQos, "");
+
+                    mqttClient->hasWill = false;
+                }
+
                 mqttClient->client->close();
 
-                ++it;
+                if (!mqttClient->cleanSession)
+                {
+
+                    logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), session will be kept.",
+
+                               mqttClient->clientId.c_str(), mqttClient->gracefulDisconnect ? "Yes" : "No");
+
+                    persistentSessions[mqttClient->clientId] = std::move(mqttClient);
+                }
+                else
+                {
+
+                    logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), Clean Session, removing client.",
+
+                               mqttClient->clientId.c_str(), mqttClient->gracefulDisconnect ? "Yes" : "No");
+                }
+
+                if (clientDisconnectCallback)
+                {
+
+                    clientDisconnectCallback(mqttClient->clientId);
+                }
+
+                connectedClientsInfo.erase(mqttClient->clientId);
+
+                clients.erase(it++);
 
                 continue;
             }
@@ -878,6 +917,8 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     client->cleanSession = cleanSession;
 
     client->keepAlive = keepAlive;
+
+    client->lastActivity = millis();
 
     // Will-Handling (falls gesetzt)
 
