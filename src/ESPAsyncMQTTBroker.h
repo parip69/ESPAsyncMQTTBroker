@@ -31,7 +31,7 @@
 #define MQTT_QOS2 2
 
 // Andere Konstanten
-#define MQTT_PROTOCOL_LEVEL 4 // MQTT 3.1.1
+#define MQTT_PROTOCOL_LEVEL 4   // MQTT 3.1.1
 #define MQTT_PROTOCOL_LEVEL_5 5 // MQTT 5.0
 #define MQTT_MAX_PACKET_SIZE 1024
 #define MQTT_MAX_TOPIC_SIZE 256   // Maximale Größe für Topic
@@ -39,9 +39,11 @@
 
 // Eigene Implementation von std::make_unique (ab C++14 Standard)
 #if __cplusplus < 201402L
-namespace std {
-    template<typename T, typename... Args>
-    std::unique_ptr<T> make_unique(Args&&... args) {
+namespace std
+{
+    template <typename T, typename... Args>
+    std::unique_ptr<T> make_unique(Args &&...args)
+    {
         return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
     }
 }
@@ -57,11 +59,11 @@ namespace std {
  */
 enum DebugLevel
 {
-    DEBUG_NONE = 0,     ///< Keine Debug-Ausgaben
-    DEBUG_ERROR = 1,    ///< Nur Fehler werden angezeigt
-    DEBUG_WARNING = 2,  ///< Warnungen und Fehler werden angezeigt
-    DEBUG_INFO = 3,     ///< Warnungen, Fehler und Informationen werden angezeigt
-    DEBUG_DEBUG = 4     ///< Alle Details werden angezeigt (inklusive Debug-Informationen)
+    DEBUG_NONE = 0,    ///< Keine Debug-Ausgaben
+    DEBUG_ERROR = 1,   ///< Nur Fehler werden angezeigt
+    DEBUG_WARNING = 2, ///< Warnungen und Fehler werden angezeigt
+    DEBUG_INFO = 3,    ///< Warnungen, Fehler und Informationen werden angezeigt
+    DEBUG_DEBUG = 4    ///< Alle Details werden angezeigt (inklusive Debug-Informationen)
 };
 
 // Logger-Funktion, die verschiedene Log-Levels unterstützt
@@ -72,8 +74,8 @@ enum DebugLevel
  */
 struct Subscription
 {
-    String filter;    ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
-    bool noLocal;     ///< MQTT 5.0 noLocal-Flag: Bei true erhält der Client keine selbst veröffentlichten Nachrichten
+    String filter; ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
+    bool noLocal;  ///< MQTT 5.0 noLocal-Flag: Bei true erhält der Client keine selbst veröffentlichten Nachrichten
     // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 
@@ -109,16 +111,18 @@ struct MQTTClient
 /**
  * State of an outgoing QoS message
  */
-enum class OutgoingQoSState {
-    AwaitingPuback,  // For QoS 1
-    AwaitingPubrec,  // For QoS 2
-    AwaitingPubcomp  // For QoS 2
+enum class OutgoingQoSState
+{
+    AwaitingPuback, // For QoS 1
+    AwaitingPubrec, // For QoS 2
+    AwaitingPubcomp // For QoS 2
 };
 
 /**
  * Represents a QoS 1 or 2 message being sent to a subscriber
  */
-struct OutgoingQoSMessage {
+struct OutgoingQoSMessage
+{
     uint8_t qos;
     bool retain;
     String topic;
@@ -142,13 +146,18 @@ struct RetainedMessage
     size_t length;
     uint8_t qos;
 
-    RetainedMessage(const String& t, const uint8_t* p, size_t len, uint8_t q)
-        : topic(t), length(len), qos(q) {
-        if (len > 0 && p != nullptr) {
+    RetainedMessage(const String &t, const uint8_t *p, size_t len, uint8_t q)
+        : topic(t), length(len), qos(q)
+    {
+        if (len > 0 && p != nullptr)
+        {
             payload.reset(new uint8_t[len]);
-            if (len <= MQTT_MAX_PAYLOAD_SIZE) {
+            if (len <= MQTT_MAX_PAYLOAD_SIZE)
+            {
                 memcpy(payload.get(), p, len);
-            } else {
+            }
+            else
+            {
                 memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
                 length = MQTT_MAX_PAYLOAD_SIZE;
             }
@@ -179,13 +188,18 @@ struct IncomingQoS2Message
 
     IncomingQoS2Message() : length(0), payload_len(0), retained(false) {}
 
-    IncomingQoS2Message(const String& t, const uint8_t* p, size_t len, bool ret, const String& clientId)
-        : topic(t), length(len), payload_len(len), retained(ret), senderClientId(clientId), originalClientId(clientId) {
-        if (len > 0 && p != nullptr) {
+    IncomingQoS2Message(const String &t, const uint8_t *p, size_t len, bool ret, const String &clientId)
+        : topic(t), length(len), payload_len(len), retained(ret), senderClientId(clientId), originalClientId(clientId)
+    {
+        if (len > 0 && p != nullptr)
+        {
             payload.reset(new uint8_t[len]);
-            if (len <= MQTT_MAX_PAYLOAD_SIZE) {
+            if (len <= MQTT_MAX_PAYLOAD_SIZE)
+            {
                 memcpy(payload.get(), p, len);
-            } else {
+            }
+            else
+            {
                 memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
                 length = MQTT_MAX_PAYLOAD_SIZE;
                 payload_len = MQTT_MAX_PAYLOAD_SIZE;
@@ -209,9 +223,9 @@ public:
     ~ESPAsyncMQTTBroker();
     void begin();
     void stop();
-    bool publish(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
-    bool publish(const char* topic, const char* payload, bool retained, uint8_t qos, const String& excludeClientId);
-    bool publish(const char* topic, uint8_t qos, bool retained, const char* payload);
+    bool publish(const char *topic, const char *payload, bool retained = false, uint8_t qos = 0);
+    bool publish(const char *topic, const char *payload, bool retained, uint8_t qos, const String &excludeClientId);
+    bool publish(const char *topic, uint8_t qos, bool retained, const char *payload);
     void setConfig(const ESPAsyncMQTTBrokerConfig &config);
     void setDebugLevel(DebugLevel level) { debugLevel = level; }
     void setLoggingCallback(LoggingCallback callback) { loggingCallback = callback; }
@@ -253,7 +267,7 @@ private:
     void handleUnsubscribe(MQTTClient *client, uint8_t *data, size_t len);
     void handlePingReq(MQTTClient *client);
     void handleDisconnect(MQTTClient *client);
-    void handlePuback(MQTTClient* client, uint8_t* data, size_t len);
+    void handlePuback(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubRec(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubRel(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubComp(MQTTClient *client, uint8_t *data, size_t len);
@@ -264,10 +278,10 @@ private:
     bool authenticateClient(const String &username, const String &password);
     void onClient(AsyncClient *client);
     void checkTimeouts();
-    void logMessage(DebugLevel level, const char* format, ...);
+    void logMessage(DebugLevel level, const char *format, ...);
     bool isValidPublishTopic(const String &topic);
     bool isValidTopicFilter(const String &filter);
-    bool publish(const char* topic, const uint8_t* payload, size_t payloadLen, bool retained, uint8_t qos, const String& excludeClientId);
+    bool publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId);
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
