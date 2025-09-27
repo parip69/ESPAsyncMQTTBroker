@@ -189,7 +189,7 @@ void ESPAsyncMQTTBroker::checkTimeouts()
         if (mqttClient->connected && mqttClient->keepAlive > 0 &&
             (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL))
         {
-            logMessage(DEBUG_INFO, "Client ⏰ inactive, disconnecting: %s", mqttClient->clientId.c_str());
+            logMessage(DEBUG_INFO, "[BROKER] KA TIMEOUT cid=%s last_ms=%lu ka_s=%d -> DISCONNECT", mqttClient->clientId.c_str(), now - mqttClient->lastActivity, mqttClient->keepAlive);
             AsyncClient *clientToClose = mqttClient->client;
             it++;
             clientToClose->close();
@@ -306,6 +306,8 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
     mqttClient->willRetain = false;
 
     mqttClient->willPayloadLen = 0;
+
+    mqttClient->kaSeen = false;
 
     client->onData([](void *arg, AsyncClient *client, void *data, size_t len)
 
@@ -817,6 +819,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     client->cleanSession = cleanSession;
 
     client->keepAlive = keepAlive;
+    logMessage(DEBUG_INFO, "[BROKER] CONNECT cid=%s kaSec=%d", clientId.c_str(), keepAlive);
 
     // Will-Handling (falls gesetzt)
 
@@ -1643,7 +1646,11 @@ void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
 {
     uint8_t pingresp[] = {0xD0, 0x00};
     client->client->write((const char *)pingresp, 2);
-    logMessage(DEBUG_DEBUG, "PING from %s answered", client->clientId.c_str());
+    if (!client->kaSeen) {
+        client->kaSeen = true;
+        logMessage(DEBUG_INFO, "[BROKER] KA REGISTERED cid=%s", client->clientId.c_str());
+    }
+    logMessage(DEBUG_INFO, "[BROKER] PINGREQ cid=%s -> PINGRESP", client->clientId.c_str());
 }
 
 void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
