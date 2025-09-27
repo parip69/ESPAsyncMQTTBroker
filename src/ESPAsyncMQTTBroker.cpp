@@ -920,6 +920,12 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     client->lastActivity = millis();
 
+    if (keepAlive > 0) {
+        logMessage(DEBUG_INFO, "KeepAlive für Client %s aktiviert: %u Sekunden (Timeout bei %u ms Inaktivität)", clientId.c_str(), keepAlive, keepAlive * 1500);
+    } else {
+        logMessage(DEBUG_DEBUG, "KeepAlive für Client %s deaktiviert (keepAlive=0)", clientId.c_str());
+    }
+
     // Will-Handling (falls gesetzt)
 
     if (willFlag)
