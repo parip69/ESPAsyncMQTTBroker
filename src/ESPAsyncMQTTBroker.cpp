@@ -189,7 +189,7 @@ void ESPAsyncMQTTBroker::checkTimeouts()
         if (mqttClient->connected && mqttClient->keepAlive > 0 &&
             (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL))
         {
-            logMessage(DEBUG_INFO, "[BROKER] KA TIMEOUT cid=%s last_ms=%lu ka_s=%d -> DISCONNECT", mqttClient->clientId.c_str(), now - mqttClient->lastActivity, mqttClient->keepAlive);
+            logMessage(DEBUG_INFO, "Client ⏰ inactive, disconnecting: %s", mqttClient->clientId.c_str());
             AsyncClient *clientToClose = mqttClient->client;
             it++;
             clientToClose->close();
