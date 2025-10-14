@@ -1,4 +1,4 @@
-// @version: 1.99.11
+// @version: 1.99.42
 
 #include "ESPAsyncMQTTBroker.h"
 
