@@ -1,4 +1,4 @@
-// @version: 1.99.42
+// @version: 1.9.42
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -1385,18 +1385,26 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
             payloadBuffer[payloadLength] = 0;
 
-            String payloadStr = String(payloadBuffer);
+            String originalPayload = String(payloadBuffer);
 
-            logMessage(DEBUG_INFO, "🔔 Publish (QoS 0) - Topic='%s', Payload='%s'", topic.c_str(), payloadStr.c_str());
+            // NEU: Payload mit Quelle-Präfix versehen
+            String newPayload = "source:[" + client->clientId + "];" + originalPayload;
+            if (newPayload.length() > MQTT_MAX_PAYLOAD_SIZE)
+            {
+                logMessage(DEBUG_WARNING, "Payload mit Source-Präfix überschreitet die maximale Größe und wird gekürzt.");
+                newPayload = newPayload.substring(0, MQTT_MAX_PAYLOAD_SIZE);
+            }
+
+            logMessage(DEBUG_INFO, "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', NeuerPayload='%s'", qos, client->clientId.c_str(), topic.c_str(), newPayload.c_str());
 
             if (messageCallback)
 
             {
 
-                messageCallback(client->clientId, topic, payloadStr);
+                messageCallback(client->clientId, topic, newPayload);
             }
 
-            publish(topic.c_str(), payloadStr.c_str(), retained, qos, client->clientId);
+            publish(topic.c_str(), newPayload.c_str(), retained, qos, client->clientId);
         }
 
         else if (retained)
@@ -1646,7 +1654,8 @@ void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
 {
     uint8_t pingresp[] = {0xD0, 0x00};
     client->client->write((const char *)pingresp, 2);
-    if (!client->kaSeen) {
+    if (!client->kaSeen)
+    {
         client->kaSeen = true;
         logMessage(DEBUG_INFO, "[BROKER] KA REGISTERED cid=%s", client->clientId.c_str());
     }
