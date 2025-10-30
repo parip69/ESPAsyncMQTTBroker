@@ -4,7 +4,7 @@
 
 #include <cstdarg>
 
-// Hilfsfunktion fÃ¼r CONNACK + Close
+// Hilfsfunktion für CONNACK + Close
 
 static inline void sendConnackAndClose(MQTTClient *client, uint8_t returnCode)
 
@@ -53,32 +53,32 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 
         String message = buffer;
 
-        // Log ausgeben (Serial oder Ã¼ber Callback)
+        // Log ausgeben (Serial oder über Callback)
 
         if (level <= DEBUG_ERROR)
 
         {
 
-            Serial.print("âŒ ");
+            Serial.print("❌ ");
         }
 
         else if (level <= DEBUG_INFO)
 
         {
 
-            Serial.print("â„¹ï¸ ");
+            Serial.print("ℹ️ ");
         }
 
         else
 
         {
 
-            Serial.print("ðŸ” ");
+            Serial.print("🔍 ");
         }
 
         Serial.println(message);
 
-        // Wenn verfÃ¼gbar, auch an Callback weiterleiten
+        // Wenn verfügbar, auch an Callback weiterleiten
 
         if (loggingCallback)
 
@@ -189,7 +189,7 @@ void ESPAsyncMQTTBroker::checkTimeouts()
         if (mqttClient->connected && mqttClient->keepAlive > 0 &&
             (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL))
         {
-            logMessage(DEBUG_INFO, "Client â° inactive, disconnecting: %s", mqttClient->clientId.c_str());
+            logMessage(DEBUG_INFO, "Client ⏰ inactive, disconnecting: %s", mqttClient->clientId.c_str());
             AsyncClient *clientToClose = mqttClient->client;
             it++;
             clientToClose->close();
@@ -272,7 +272,7 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
         setDebugLevel(DEBUG_NONE);
     }
 
-    logMessage(DEBUG_INFO, "ðŸ”§ MQTT-Broker Configuration:");
+    logMessage(DEBUG_INFO, "🔧 MQTT-Broker Configuration:");
 
     logMessage(DEBUG_INFO, "   Username: %s", (brokerConfig.username.isEmpty() ? "[empty]" : brokerConfig.username.c_str()));
 
@@ -656,12 +656,12 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
 
 void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32_t length)
 {
-    logMessage(DEBUG_DEBUG, "ðŸ” MQTT CONNECT Paket empfangen (len=%u)", length);
+    logMessage(DEBUG_DEBUG, "🔍 MQTT CONNECT Paket empfangen (len=%u)", length);
     if (length < 10)
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Paket zu kurz!");
+        logMessage(DEBUG_ERROR, "❌ Paket zu kurz!");
 
         return;
     }
@@ -674,7 +674,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Protokollnamen!");
+        logMessage(DEBUG_ERROR, "❌ Zu kurz für Protokollnamen!");
 
         return;
     }
@@ -685,7 +685,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Protocol name too long!");
+        logMessage(DEBUG_ERROR, "❌ Protocol name too long!");
 
         return;
     }
@@ -698,7 +698,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Protokoll-Level!");
+        logMessage(DEBUG_ERROR, "❌ Zu kurz für Protokoll-Level!");
 
         return;
     }
@@ -713,7 +713,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r CONNECT-Flags!");
+        logMessage(DEBUG_ERROR, "❌ Zu kurz für CONNECT-Flags!");
 
         return;
     }
@@ -734,7 +734,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Keep-Alive!");
+        logMessage(DEBUG_ERROR, "❌ Zu kurz für Keep-Alive!");
 
         return;
     }
@@ -749,7 +749,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Client-ID!");
+        logMessage(DEBUG_ERROR, "❌ Zu kurz für Client-ID!");
 
         return;
     }
@@ -773,7 +773,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r komplette Client-ID!");
+        logMessage(DEBUG_ERROR, "❌ Zu kurz für komplette Client-ID!");
 
         return;
     }
@@ -784,7 +784,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_ERROR, "âŒ Client-ID too long!");
+        logMessage(DEBUG_ERROR, "❌ Client-ID too long!");
 
         return;
     }
@@ -807,7 +807,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        logMessage(DEBUG_INFO, "â™»ï¸ Persistente Session wiederhergestellt fÃ¼r Client: %s", clientId.c_str());
+        logMessage(DEBUG_INFO, "♻️ Persistente Session wiederhergestellt für Client: %s", clientId.c_str());
 
         client->subscriptions = sessionIt->second->subscriptions;
 
@@ -837,7 +837,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Will-Topic-LÃ¤nge!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Topic-Länge!");
 
             client->client->close();
 
@@ -852,7 +852,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Will-Topic!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Topic!");
 
             client->client->close();
 
@@ -893,7 +893,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Will-Payload-LÃ¤nge!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Payload-Länge!");
 
             client->client->close();
 
@@ -908,7 +908,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Will-Payload!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Payload!");
 
             client->client->close();
 
@@ -923,7 +923,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_WARNING, "Will-Payload wird gekÃ¼rzt auf %u (von %u)", MQTT_MAX_PAYLOAD_SIZE, willPayloadActualLen);
+            logMessage(DEBUG_WARNING, "Will-Payload wird gekürzt auf %u (von %u)", MQTT_MAX_PAYLOAD_SIZE, willPayloadActualLen);
 
             lenToCopy = MQTT_MAX_PAYLOAD_SIZE;
 
@@ -956,7 +956,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         client->hasWill = false;
     }
 
-    // --- Username/Password Flags & KONFIG-MODUS (fÃ¼r glasklare Diagnose) ---
+    // --- Username/Password Flags & KONFIG-MODUS (für glasklare Diagnose) ---
 
     const bool cfgUserSet = !brokerConfig.username.isEmpty();
 
@@ -976,7 +976,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
                (unsigned)keepAlive, clientId.c_str());
 
-    // --- Einheitliches AUTH-Log (keine Klartext-PasswÃ¶rter) ---
+    // --- Einheitliches AUTH-Log (keine Klartext-Passwörter) ---
 
     if (!cfgUserSet)
 
@@ -1009,7 +1009,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     {
 
-        // USER_PASS: beide Flags MÃœSSEN gesetzt sein
+        // USER_PASS: beide Flags MÜSSEN gesetzt sein
 
         if (!usernameFlag || !passwordFlag)
 
@@ -1039,7 +1039,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Username-LÃ¤nge!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Username-Länge!");
 
             return;
         }
@@ -1052,7 +1052,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Username!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Username!");
 
             return;
         }
@@ -1083,7 +1083,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Password-LÃ¤nge!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Password-Länge!");
 
             return;
         }
@@ -1096,7 +1096,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
         {
 
-            logMessage(DEBUG_ERROR, "âŒ Zu kurz fÃ¼r Password!");
+            logMessage(DEBUG_ERROR, "❌ Zu kurz für Password!");
 
             return;
         }
@@ -1173,7 +1173,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     authFrame += F("+------------------------------------------+");
 
     logMessage(DEBUG_INFO, "%s", authFrame.c_str());
-    // --- Zusammenfassung (ohne PasswÃ¶rter im Klartext) ---
+    // --- Zusammenfassung (ohne Passwörter im Klartext) ---
 
     logMessage(DEBUG_INFO, "--- MQTT Client Connect Info ---");
 
@@ -1195,20 +1195,20 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     // --- Authentifizierung ---
 
-    logMessage(DEBUG_DEBUG, "Checking authenticationâ€¦");
+    logMessage(DEBUG_DEBUG, "Checking authentication…");
 
     if (!authenticateClient(username, password))
 
     {
 
-        logMessage(DEBUG_ERROR, "ðŸš« Authentication failed â€“ Reject (0x04)");
+        logMessage(DEBUG_ERROR, "🚫 Authentication failed – Reject (0x04)");
 
         sendConnackAndClose(client, 0x04); // Bad user name or password
 
         return;
     }
 
-    logMessage(DEBUG_INFO, "âœ… Auth OK â€“ Verbindung akzeptiert");
+    logMessage(DEBUG_INFO, "✅ Auth OK – Verbindung akzeptiert");
 
     // Erfolg: CONNACK senden
 
@@ -1218,7 +1218,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     client->connected = true;
 
-    // Callback & Liste fÃ¼hren
+    // Callback & Liste führen
 
     if (clientConnectCallback)
 
@@ -1356,7 +1356,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         }
     }
 
-    // Verteilung der Nachricht an Abonnenten fÃ¼r QoS 0 und QoS 1.
+    // Verteilung der Nachricht an Abonnenten für QoS 0 und QoS 1.
 
     // (QoS 2 wird erst nach Abschluss des Handshakes in handlePubRel verteilt.)
 
@@ -1387,20 +1387,15 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
             String originalPayload = String(payloadBuffer);
 
-            // NEU: Payload mit Quelle-PrÃ¤fix versehen (sichere Implementierung)
-            String prefix = "source:[" + client->clientId + "];";
-            int prefixLen = prefix.length();
-            int maxOriginalPayloadLen = MQTT_MAX_PAYLOAD_SIZE - prefixLen;
-
-            if (originalPayload.length() > maxOriginalPayloadLen)
+            // NEU: Payload mit Quelle-Präfix versehen
+            String newPayload = "source:[" + client->clientId + "];" + originalPayload;
+            if (newPayload.length() > MQTT_MAX_PAYLOAD_SIZE)
             {
-                logMessage(DEBUG_WARNING, "Original-Payload wird gekÃ¼rzt, um das Source-PrÃ¤fix unterzubringen.");
-                originalPayload = originalPayload.substring(0, maxOriginalPayloadLen);
+                logMessage(DEBUG_WARNING, "Payload mit Source-Präfix überschreitet die maximale Größe und wird gekürzt.");
+                newPayload = newPayload.substring(0, MQTT_MAX_PAYLOAD_SIZE);
             }
 
-            String newPayload = prefix + originalPayload;
-
-            logMessage(DEBUG_INFO, "ðŸ”” Weiterleiten (QoS %d, von %s) - Topic='%s', NeuerPayload='%s'", qos, client->clientId.c_str(), topic.c_str(), newPayload.c_str());
+            logMessage(DEBUG_INFO, "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', NeuerPayload='%s'", qos, client->clientId.c_str(), topic.c_str(), newPayload.c_str());
 
             if (messageCallback)
 
@@ -2142,7 +2137,7 @@ bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)
 
     {
 
-        logMessage(DEBUG_ERROR, "UngÃ¼ltiger Port 0");
+        logMessage(DEBUG_ERROR, "Ungültiger Port 0");
 
         return false;
     }
@@ -2151,14 +2146,14 @@ bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)
 
     {
 
-        logMessage(DEBUG_WARNING, "PortÃ¤nderung auf %u abgelehnt â€“ Server lÃ¤uft", (unsigned)newPort);
+        logMessage(DEBUG_WARNING, "Portänderung auf %u abgelehnt – Server läuft", (unsigned)newPort);
 
         return false;
     }
 
     port = newPort;
 
-    logMessage(DEBUG_INFO, "Broker-Port gesetzt auf %u (wirksam bei nÃ¤chstem begin())", (unsigned)newPort);
+    logMessage(DEBUG_INFO, "Broker-Port gesetzt auf %u (wirksam bei nächstem begin())", (unsigned)newPort);
 
     return true;
 }
@@ -2287,7 +2282,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         payloadLen = MQTT_MAX_PAYLOAD_SIZE;
     }
 
-    logMessage(DEBUG_INFO, "ðŸ“¤ Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
+    logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
 
     if (!excludeClientId.isEmpty())
 
@@ -2527,7 +2522,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
         }
     }
 
-    logMessage(DEBUG_INFO, "ðŸ“Š Message sent to %d of %d connected clients", sentCount, clientCount);
+    logMessage(DEBUG_INFO, "📊 Message sent to %d of %d connected clients", sentCount, clientCount);
 
     return messageSent;
 }
