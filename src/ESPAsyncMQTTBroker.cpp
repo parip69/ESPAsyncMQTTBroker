@@ -37,6 +37,9 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 
 {
 
+    if (debugLevel == DEBUG_NONE)
+        return;  // Keine Ausgabe wenn DEBUG_NONE gesetzt
+
     if (level <= debugLevel)
 
     {
@@ -2327,53 +2330,9 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
 
         clientCount++;
 
-        bool isOriginalPublisherAndShouldBeSkipped = false;
-
         if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
-
         {
-
-            // Check if all matching subscriptions have noLocal=true
-
-            bool hasMatchingSub = false;
-
-            bool canReceive = false;
-
-            for (const auto &sub : c->subscriptions)
-
-            {
-
-                if (topicMatches(sub, topicStr))
-
-                {
-
-                    hasMatchingSub = true;
-
-                    if (!sub.noLocal)
-
-                    {
-
-                        canReceive = true;
-
-                        break;
-                    }
-                }
-            }
-
-            if (hasMatchingSub && !canReceive)
-
-            {
-
-                isOriginalPublisherAndShouldBeSkipped = true;
-            }
-        }
-
-        if (isOriginalPublisherAndShouldBeSkipped)
-
-        {
-
-            logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped (all matching subscriptions have noLocal=true)", c->clientId.c_str());
-
+            logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped", c->clientId.c_str());
             continue;
         }
 
