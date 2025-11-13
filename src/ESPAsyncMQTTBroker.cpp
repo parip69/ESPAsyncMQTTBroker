@@ -95,6 +95,11 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 ESPAsyncMQTTBroker::ESPAsyncMQTTBroker(uint16_t port) : port(port)
 
 {
+    #ifdef BROKER_DEBUG_LEVEL
+    debugLevel = (DebugLevel)BROKER_DEBUG_LEVEL;
+    #else
+    debugLevel = DEBUG_INFO;
+    #endif
 }
 
 ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
