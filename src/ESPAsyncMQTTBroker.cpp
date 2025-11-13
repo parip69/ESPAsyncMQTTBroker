@@ -266,19 +266,10 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
 
     brokerConfig = config;
 
-    if (brokerConfig.log)
-
-    {
-
-        setDebugLevel(DEBUG_INFO);
-    }
-
-    else
-
-    {
-
-        setDebugLevel(DEBUG_NONE);
-    }
+    // WICHTIG: Nicht den debugLevel überschreiben!
+    // Der debugLevel wird via BROKER_DEBUG_LEVEL Build-Flag in der platformio.ini gesetzt
+    // und sollte NICHT durch setConfig() überschrieben werden.
+    // Der Benutzer kann alternativ setDebugLevel() direkt aufrufen, wenn gewünscht.
 
     logMessage(DEBUG_INFO, "🔧 MQTT-Broker Configuration:");
 
