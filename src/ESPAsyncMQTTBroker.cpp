@@ -38,7 +38,7 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 {
 
     if (debugLevel == DEBUG_NONE)
-        return;  // Keine Ausgabe wenn DEBUG_NONE gesetzt
+        return; // Keine Ausgabe wenn DEBUG_NONE gesetzt
 
     if (level <= debugLevel)
 
@@ -1662,7 +1662,7 @@ void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
         client->kaSeen = true;
         logMessage(DEBUG_INFO, "[BROKER] KA REGISTERED cid=%s", client->clientId.c_str());
     }
-    logMessage(DEBUG_INFO, "[BROKER] PINGREQ cid=%s -> PINGRESP", client->clientId.c_str());
+    logMessage(DEBUG_DEBUG, "[BROKER] PINGREQ cid=%s -> PINGRESP", client->clientId.c_str());
 }
 
 void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
