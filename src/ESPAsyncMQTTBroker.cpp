@@ -95,11 +95,11 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 ESPAsyncMQTTBroker::ESPAsyncMQTTBroker(uint16_t port) : port(port)
 
 {
-#ifdef BROKER_DEBUG_LEVEL
+    #ifdef BROKER_DEBUG_LEVEL
     debugLevel = (DebugLevel)BROKER_DEBUG_LEVEL;
-#else
+    #else
     debugLevel = DEBUG_INFO;
-#endif
+    #endif
 }
 
 ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
@@ -1192,87 +1192,6 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     logMessage(DEBUG_INFO, "--------------------------------");
 
-    // --- Brute-Force Check (VOR ACL & Auth) ---
-
-    String clientKey = client->clientId.isEmpty() ? client->client->remoteIP().toString() : client->clientId;
-
-    if (isClientBruteForceBlocked(clientKey)) {
-
-        logMessage(DEBUG_ERROR, "🔒 BLOCKED - Zu viele fehlgeschlagene Versuche!");
-
-        sendConnackAndClose(client, 0x05); // Not authorized
-
-        return;
-    }
-
-    // --- ACL-Vergleich (komma-getrennte Username-Liste durchsuchen) ---
-
-    if (!brokerConfig.username.isEmpty() && !username.isEmpty())
-    {
-
-        String aclList = brokerConfig.username;
-        int start = 0;
-        int commaPos = 0;
-        bool found = false;
-        bool isBlocked = false;
-
-        // Von Komma zu Komma durchlaufen
-        while ((commaPos = aclList.indexOf(',', start)) != -1)
-        {
-            String entry = aclList.substring(start, commaPos);
-            entry.trim();
-
-            // Mit ! = blockiert
-            if (entry.length() > 0 && entry[0] == '!')
-            {
-                entry = entry.substring(1);
-                entry.trim();
-                if (entry == username)
-                {
-                    isBlocked = true;
-                    break;
-                }
-            }
-            else if (entry == username)
-            {
-                found = true;
-                break;
-            }
-
-            start = commaPos + 1;
-        }
-
-        // Letzter Eintrag prüfen
-        if (!found && !isBlocked)
-        {
-            String lastEntry = aclList.substring(start);
-            lastEntry.trim();
-            
-            if (lastEntry.length() > 0 && lastEntry[0] == '!')
-            {
-                lastEntry = lastEntry.substring(1);
-                lastEntry.trim();
-                if (lastEntry == username)
-                {
-                    isBlocked = true;
-                }
-            }
-            else if (lastEntry == username)
-            {
-                found = true;
-            }
-        }
-
-        // Nicht erlaubt = blockiert
-        if (isBlocked || !found)
-        {
-            recordFailedAttempt(clientKey);
-            logMessage(DEBUG_WARNING, "❌ ACL abgelehnt für: %s", username.c_str());
-            sendConnackAndClose(client, 0x05); // Not authorized
-            return;
-        }
-    }
-
     // --- Authentifizierung ---
 
     logMessage(DEBUG_DEBUG, "Checking authentication…");
@@ -1280,7 +1199,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     if (!authenticateClient(username, password))
 
     {
-        recordFailedAttempt(clientKey);
+
         logMessage(DEBUG_ERROR, "🚫 Authentication failed – Reject (0x04)");
 
         sendConnackAndClose(client, 0x04); // Bad user name or password
@@ -1288,8 +1207,6 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         return;
     }
 
-    // ✅ Erfolg! Fehlversuche löschen
-    clearFailedAttempts(clientKey);
     logMessage(DEBUG_INFO, "✅ Auth OK – Verbindung akzeptiert");
 
     // Erfolg: CONNACK senden
@@ -2238,64 +2155,6 @@ bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)
     logMessage(DEBUG_INFO, "Broker-Port gesetzt auf %u (wirksam bei nächstem begin())", (unsigned)newPort);
 
     return true;
-}
-
-bool ESPAsyncMQTTBroker::isClientBruteForceBlocked(const String &clientKey)
-{
-    auto it = failedAttempts.find(clientKey);
-    if (it == failedAttempts.end()) {
-        return false;  // Kein Eintrag = nicht blockiert
-    }
-
-    uint32_t now = millis();
-    FailedAttempt &attempt = it->second;
-
-    // Check ob Timeout abgelaufen ist
-    if (now - attempt.firstAttemptTime > BRUTE_FORCE_TIMEOUT) {
-        failedAttempts.erase(it);  // Timeout abgelaufen, löschen
-        return false;
-    }
-
-    // Noch blockiert
-    if (attempt.failureCount >= MAX_FAILED_ATTEMPTS) {
-        logMessage(DEBUG_WARNING, "🔒 Client blockiert (Brute-Force): %s", clientKey.c_str());
-        return true;
-    }
-
-    return false;
-}
-
-void ESPAsyncMQTTBroker::recordFailedAttempt(const String &clientKey)
-{
-    auto it = failedAttempts.find(clientKey);
-    uint32_t now = millis();
-
-    if (it == failedAttempts.end()) {
-        // Erster Fehlversuch
-        failedAttempts[clientKey] = {now, 1};
-        logMessage(DEBUG_WARNING, "⚠️ Fehlversuch 1/3 für: %s", clientKey.c_str());
-    } else {
-        FailedAttempt &attempt = it->second;
-
-        // Timeout abgelaufen? Reset
-        if (now - attempt.firstAttemptTime > BRUTE_FORCE_TIMEOUT) {
-            attempt.firstAttemptTime = now;
-            attempt.failureCount = 1;
-            logMessage(DEBUG_WARNING, "⚠️ Fehlversuch 1/3 für: %s (Reset)", clientKey.c_str());
-        } else {
-            attempt.failureCount++;
-            logMessage(DEBUG_WARNING, "⚠️ Fehlversuch %d/3 für: %s", (int)attempt.failureCount, clientKey.c_str());
-        }
-    }
-}
-
-void ESPAsyncMQTTBroker::clearFailedAttempts(const String &clientKey)
-{
-    auto it = failedAttempts.find(clientKey);
-    if (it != failedAttempts.end()) {
-        failedAttempts.erase(it);
-        logMessage(DEBUG_INFO, "✅ Fehlversuche gelöscht für: %s", clientKey.c_str());
-    }
 }
 
 bool ESPAsyncMQTTBroker::isValidPublishTopic(const String &topic)
