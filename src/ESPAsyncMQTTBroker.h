@@ -251,6 +251,15 @@ private:
     std::map<String, String> connectedClientsInfo;
     uint16_t nextPacketId = 1;
 
+    // Brute-Force Protection
+    struct FailedAttempt {
+        uint32_t firstAttemptTime;
+        uint8_t failureCount;
+    };
+    std::map<String, FailedAttempt> failedAttempts;  // Key: clientId oder IP
+    static const uint32_t BRUTE_FORCE_TIMEOUT = 60000;  // 60 Sekunden Lockout
+    static const uint8_t MAX_FAILED_ATTEMPTS = 3;
+
     uint16_t getNextPacketId();
 
     ClientCallback clientConnectCallback = nullptr;
@@ -282,6 +291,10 @@ private:
     bool isValidPublishTopic(const String &topic);
     bool isValidTopicFilter(const String &filter);
     bool publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId);
+    bool isClientBruteForceBlocked(const String &clientKey);
+    void recordFailedAttempt(const String &clientKey);
+    void clearFailedAttempts(const String &clientKey);
+
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
