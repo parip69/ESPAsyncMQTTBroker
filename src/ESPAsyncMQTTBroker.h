@@ -1,4 +1,4 @@
-// @version: 1.9.42
+// ❤️ 📂 🎉DNS auflösung alles geht. super 📂 ❤️
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -246,7 +246,7 @@ private:
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
     std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages;
     ESPAsyncMQTTBrokerConfig brokerConfig;
-    DebugLevel debugLevel = DEBUG_INFO;  // ← Wird im Konstruktor überschrieben mit BROKER_DEBUG_LEVEL!
+    DebugLevel debugLevel = DEBUG_INFO; // ← Wird im Konstruktor überschrieben mit BROKER_DEBUG_LEVEL!
     esp_timer_handle_t timeoutTimer = nullptr;
     std::map<String, String> connectedClientsInfo;
     uint16_t nextPacketId = 1;
