@@ -1,4 +1,4 @@
-// @version: 1.9.42
+// ❤️ 📂 🎉DNS auflösung alles geht. super 📂 ❤️
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -95,11 +95,11 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 ESPAsyncMQTTBroker::ESPAsyncMQTTBroker(uint16_t port) : port(port)
 
 {
-    #ifdef BROKER_DEBUG_LEVEL
+#ifdef BROKER_DEBUG_LEVEL
     debugLevel = (DebugLevel)BROKER_DEBUG_LEVEL;
-    #else
+#else
     debugLevel = DEBUG_INFO;
-    #endif
+#endif
 }
 
 ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
