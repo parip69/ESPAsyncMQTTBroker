@@ -95,11 +95,11 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 ESPAsyncMQTTBroker::ESPAsyncMQTTBroker(uint16_t port) : port(port)
 
 {
-    #ifdef BROKER_DEBUG_LEVEL
+#ifdef BROKER_DEBUG_LEVEL
     debugLevel = (DebugLevel)BROKER_DEBUG_LEVEL;
-    #else
+#else
     debugLevel = DEBUG_INFO;
-    #endif
+#endif
 }
 
 ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
@@ -1191,6 +1191,72 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     logMessage(DEBUG_INFO, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
 
     logMessage(DEBUG_INFO, "--------------------------------");
+
+    // --- ACL-Vergleich (komma-getrennte Username-Liste durchsuchen) ---
+
+    if (!brokerConfig.password.isEmpty() && !username.isEmpty())
+    {
+
+        String aclList = brokerConfig.password;
+        int start = 0;
+        int commaPos = 0;
+        bool found = false;
+        bool isBlocked = false;
+
+        // Von Komma zu Komma durchlaufen
+        while ((commaPos = aclList.indexOf(',', start)) != -1)
+        {
+            String entry = aclList.substring(start, commaPos);
+            entry.trim();
+
+            // Mit ! = blockiert
+            if (entry.length() > 0 && entry[0] == '!')
+            {
+                entry = entry.substring(1);
+                entry.trim();
+                if (entry == username)
+                {
+                    isBlocked = true;
+                    break;
+                }
+            }
+            else if (entry == username)
+            {
+                found = true;
+                break;
+            }
+
+            start = commaPos + 1;
+        }
+
+        // Letzter Eintrag prüfen
+        if (!found && !isBlocked)
+        {
+            String lastEntry = aclList.substring(start);
+            lastEntry.trim();
+
+            if (lastEntry.length() > 0 && lastEntry[0] == '!')
+            {
+                lastEntry = lastEntry.substring(1);
+                lastEntry.trim();
+                if (lastEntry == username)
+                {
+                    isBlocked = true;
+                }
+            }
+            else if (lastEntry == username)
+            {
+                found = true;
+            }
+        }
+
+        // Nicht erlaubt = blockiert
+        if (isBlocked || !found)
+        {
+            sendConnackAndClose(client, 0x05); // Not authorized
+            return;
+        }
+    }
 
     // --- Authentifizierung ---
 
