@@ -1,4 +1,5 @@
-// @version: 1.9.42
+// ❤️ 📂 🎉❤️ endlich mehere cliens mqtt ❤️ 📂 🎉❤️️
+// @ 2.0.216
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -279,7 +280,8 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
         while (start < list.length())
         {
             int comma = list.indexOf(',', start);
-            if (comma < 0) comma = list.length();
+            if (comma < 0)
+                comma = list.length();
 
             String u = list.substring(start, comma);
             u.trim();        // entfernt Leerzeichen pro User (z.B. "User 1, User2")
