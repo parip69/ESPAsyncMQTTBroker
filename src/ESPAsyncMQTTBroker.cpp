@@ -1,4 +1,4 @@
-// ❤️ 📂 🎉DNS auflösung alles geht. super 📂 ❤️
+// @version: 1.9.42
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -2057,74 +2057,82 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
     }
 }
 
-bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String &password)
-
+bool ESPAsyncMQTTBroker::isUserAllowed(const String &username, const String &userList)
 {
+    if (username.isEmpty())
+        return false;
+    String userLower = username;
+    userLower.toLowerCase();
+    userLower.trim();
 
-    // --- DROP-IN: Neue Authentifizierungslogik ---
+    int currentIndex = 0;
+    int nextIndex = 0;
+    while ((nextIndex = userList.indexOf(',', currentIndex)) != -1)
+    {
+        String allowedUser = userList.substring(currentIndex, nextIndex);
+        allowedUser.toLowerCase();
+        allowedUser.trim();
+        if (allowedUser == userLower)
+        {
+            return true;
+        }
+        currentIndex = nextIndex + 1;
+    }
 
-    const String U = brokerConfig.username;
+    String lastUser = userList.substring(currentIndex);
+    lastUser.toLowerCase();
+    lastUser.trim();
+    if (lastUser == userLower)
+    {
+        return true;
+    }
 
+    return false;
+}
+
+bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String &password)
+{
+    const String U_LIST = brokerConfig.username;
     const String P = brokerConfig.password;
-
-    const bool cfgUserSet = !U.isEmpty();
-
+    const bool cfgUserSet = !U_LIST.isEmpty();
     const bool cfgPassSet = !P.isEmpty();
 
     if (!cfgUserSet)
-
     {
-
         logMessage(DEBUG_INFO, "[AUTH] Mode=ANON: Broker akzeptiert alle anonymen Clients. -> Accept");
-
         return true;
     }
 
     String u = username;
-
     u.trim();
-
     String p = password;
-
     p.trim();
 
     if (cfgUserSet && !cfgPassSet)
-
     {
-
         if (u.isEmpty())
-
         {
-
             logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_ONLY: Username fehlt -> Reject");
-
             return false;
         }
-
-        bool ok = (u == U);
-
-        logMessage(ok ? DEBUG_INFO : DEBUG_ERROR,
-
-                   "[AUTH] Mode=USER_ONLY: Client='%s', Broker='%s' => %s", u.c_str(), U.c_str(), ok ? "Accept" : "Reject");
-
-        return ok;
+        bool userOk = isUserAllowed(u, U_LIST);
+        logMessage(userOk ? DEBUG_INFO : DEBUG_ERROR,
+                   "[AUTH] Mode=USER_ONLY: Client='%s' in Liste '%s'? => %s", u.c_str(), U_LIST.c_str(), userOk ? "Accept" : "Reject");
+        return userOk;
     }
 
     if (u.isEmpty() || p.isEmpty())
-
     {
-
         logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_PASS: Username oder Passwort fehlt (u_len=%d, p_len=%d) -> Reject", (int)u.length(), (int)p.length());
-
         return false;
     }
 
-    bool ok = (u == U) && (p == P);
+    bool userOk = isUserAllowed(u, U_LIST);
+    bool passOk = (p == P);
+    bool ok = userOk && passOk;
 
     logMessage(ok ? DEBUG_INFO : DEBUG_ERROR,
-
-               "[AUTH] Mode=USER_PASS: Client='%s', Broker='%s', Passwort=[set] => %s", u.c_str(), U.c_str(), ok ? "Accept" : "Reject");
-
+               "[AUTH] Mode=USER_PASS: Client='%s', PassOK=%s => %s", u.c_str(), passOk ? "Yes" : "No", ok ? "Accept" : "Reject");
     return ok;
 }
 
