@@ -118,6 +118,20 @@ ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
     connectedClientsInfo.clear();
 }
 
+size_t ESPAsyncMQTTBroker::getConnectedClientCount() const
+{
+    size_t count = 0;
+    for (const auto &kv : clients)
+    {
+        const auto &c = kv.second;
+        if (c && c->connected)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
 void ESPAsyncMQTTBroker::begin()
 
 {
