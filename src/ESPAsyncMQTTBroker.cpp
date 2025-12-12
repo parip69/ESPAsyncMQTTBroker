@@ -1,4 +1,3 @@
-// ❤️ 📂 🎉DNS auflösung alles geht. super 📂 ❤️
 // @version: 1.9.42
 
 #include "ESPAsyncMQTTBroker.h"
@@ -266,6 +265,32 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
 {
 
     brokerConfig = config;
+
+    // ---------- AUTH CACHE AUFBAU (einmalig) ----------
+    allowedUsersLower.clear();
+    authAnonMode = brokerConfig.username.isEmpty();
+    authNeedPassword = !brokerConfig.password.isEmpty();
+
+    if (!authAnonMode)
+    {
+        String list = brokerConfig.username;
+        int start = 0;
+
+        while (start < list.length())
+        {
+            int comma = list.indexOf(',', start);
+            if (comma < 0) comma = list.length();
+
+            String u = list.substring(start, comma);
+            u.trim();        // entfernt Leerzeichen pro User (z.B. "User 1, User2")
+            u.toLowerCase(); // case-insensitiv
+
+            if (!u.isEmpty())
+                allowedUsersLower.push_back(u);
+
+            start = comma + 1;
+        }
+    }
 
     // WICHTIG: Nicht den debugLevel überschreiben!
     // Der debugLevel wird via BROKER_DEBUG_LEVEL Build-Flag in der platformio.ini gesetzt
@@ -2093,48 +2118,98 @@ bool ESPAsyncMQTTBroker::isUserAllowed(const String &username, const String &use
 
 bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String &password)
 {
-    const String U_LIST = brokerConfig.username;
-    const String P = brokerConfig.password;
-    const bool cfgUserSet = !U_LIST.isEmpty();
-    const bool cfgPassSet = !P.isEmpty();
-
-    if (!cfgUserSet)
+    // ANON: keine Auth konfiguriert -> alles akzeptieren
+    if (authAnonMode)
     {
-        logMessage(DEBUG_INFO, "[AUTH] Mode=ANON: Broker akzeptiert alle anonymen Clients. -> Accept");
+        if (brokerConfig.log)
+        {
+            logMessage(DEBUG_INFO, "[AUTH] Mode=ANON: Broker akzeptiert alle anonymen Clients. -> Accept");
+        }
         return true;
     }
 
+    // Username normalisieren
     String u = username;
     u.trim();
-    String p = password;
-    p.trim();
+    u.toLowerCase();
 
-    if (cfgUserSet && !cfgPassSet)
+    if (u.isEmpty())
     {
-        if (u.isEmpty())
+        if (brokerConfig.log)
         {
-            logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_ONLY: Username fehlt -> Reject");
-            return false;
+            logMessage(DEBUG_ERROR, "[AUTH] Username fehlt/leer -> Reject");
         }
-        bool userOk = isUserAllowed(u, U_LIST);
-        logMessage(userOk ? DEBUG_INFO : DEBUG_ERROR,
-                   "[AUTH] Mode=USER_ONLY: Client='%s' in Liste '%s'? => %s", u.c_str(), U_LIST.c_str(), userOk ? "Accept" : "Reject");
-        return userOk;
-    }
-
-    if (u.isEmpty() || p.isEmpty())
-    {
-        logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_PASS: Username oder Passwort fehlt (u_len=%d, p_len=%d) -> Reject", (int)u.length(), (int)p.length());
         return false;
     }
 
-    bool userOk = isUserAllowed(u, U_LIST);
-    bool passOk = (p == P);
-    bool ok = userOk && passOk;
+    // Username gegen Cache prüfen
+    bool userOk = false;
+    for (const auto &au : allowedUsersLower)
+    {
+        if (au == u)
+        {
+            userOk = true;
+            break;
+        }
+    }
 
-    logMessage(ok ? DEBUG_INFO : DEBUG_ERROR,
-               "[AUTH] Mode=USER_PASS: Client='%s', PassOK=%s => %s", u.c_str(), passOk ? "Yes" : "No", ok ? "Accept" : "Reject");
-    return ok;
+    if (!userOk)
+    {
+        if (brokerConfig.log)
+        {
+            logMessage(DEBUG_ERROR, "[AUTH] Username '%s' nicht in erlaubter Liste -> Reject", u.c_str());
+        }
+        return false;
+    }
+
+    // USER_ONLY
+    if (!authNeedPassword)
+    {
+        if (brokerConfig.log)
+        {
+            logMessage(DEBUG_INFO, "[AUTH] Mode=USER_ONLY: Username OK -> Accept");
+        }
+        return true;
+    }
+
+    // USER+PASS
+    String p = password;
+    p.trim();
+
+    if (p.isEmpty())
+    {
+        if (brokerConfig.log)
+        {
+            logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_PASS: Passwort fehlt/leer -> Reject");
+        }
+        return false;
+    }
+
+    // Fail-fast: Länge prüfen
+    if (p.length() != brokerConfig.password.length())
+    {
+        if (brokerConfig.log)
+        {
+            logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_PASS: Passwort-Länge passt nicht -> Reject");
+        }
+        return false;
+    }
+
+    bool passOk = (p == brokerConfig.password);
+    if (!passOk)
+    {
+        if (brokerConfig.log)
+        {
+            logMessage(DEBUG_ERROR, "[AUTH] Mode=USER_PASS: Passwort falsch -> Reject");
+        }
+        return false;
+    }
+
+    if (brokerConfig.log)
+    {
+        logMessage(DEBUG_INFO, "[AUTH] Mode=USER_PASS: Username+Pass OK -> Accept");
+    }
+    return true;
 }
 
 bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)
