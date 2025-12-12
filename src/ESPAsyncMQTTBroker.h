@@ -237,6 +237,10 @@ public:
     void onSubscribe(SubscribeCallback callback) { subscribeCallback = callback; }
     void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
     std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
+
+    // ---- Connected-Clients API (für UI/Status ohne separaten Zähler) ----
+    // Gibt die Anzahl aktuell als "connected" markierter Sessions zurück.
+    size_t getConnectedClientCount() const;
     bool setPort(uint16_t newPort);
 
 private:
