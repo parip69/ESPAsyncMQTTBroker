@@ -1161,80 +1161,79 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     }
 
     // --- AUTH-Log im Rahmenformat ---
-    if (brokerConfig.log && debugLevel >= DEBUG_INFO)
+    if (debugLevel >= DEBUG_INFO)
     {
+        String cfgUserStr = brokerConfig.username.isEmpty() ? "<empty>" : brokerConfig.username;
+        String cfgPassStr = brokerConfig.password.isEmpty() ? "<empty>" : "<set>";
+        String policyMode = (!cfgUserSet) ? "ANON" : (!cfgPassSet ? "USER" : "USER+PASS");
+        String tryStr = String(usernameFlag ? "U" : "-") + String(passwordFlag ? "P" : "-");
+        String userInStr = usernameFlag ? (username.isEmpty() ? "<none>" : username) : "<none>";
+        String passInStr = passwordFlag ? (password.isEmpty() ? "<none>" : "<present>") : "<none>";
+        String passLenStr = passwordFlag ? String(password.length()) : "";
 
-    String cfgUserStr = brokerConfig.username.isEmpty() ? "<empty>" : brokerConfig.username;
-    String cfgPassStr = brokerConfig.password.isEmpty() ? "<empty>" : "<set>";
-    String policyMode = (!cfgUserSet) ? "ANON" : (!cfgPassSet ? "USER" : "USER+PASS");
-    String tryStr = String(usernameFlag ? "U" : "-") + String(passwordFlag ? "P" : "-");
-    String userInStr = usernameFlag ? (username.isEmpty() ? "<none>" : username) : "<none>";
-    String passInStr = passwordFlag ? (password.isEmpty() ? "<none>" : "<present>") : "<none>";
-    String passLenStr = passwordFlag ? String(password.length()) : "";
+        String remoteIpStr = "<unknown>";
+        if (client->client)
+        {
+            IPAddress remoteIp = client->client->remoteIP();
+            remoteIpStr = remoteIp.toString();
+        }
 
-    String remoteIpStr = "<unknown>";
-    if (client->client)
-    {
-        IPAddress remoteIp = client->client->remoteIP();
-        remoteIpStr = remoteIp.toString();
-    }
-
-    String authFrame;
-    authFrame.reserve(256);
-    authFrame += F("[MQTT][AUTH][BROKER]\n");
-    authFrame += F("+------------------------------------------+\n");
-    authFrame += F("| clientId : ");
-    authFrame += clientId;
-    authFrame += F(" |\n");
-    authFrame += F("| ip       : ");
-    authFrame += remoteIpStr;
-    authFrame += F(" |\n");
-    authFrame += F("| cfg      : ");
-    authFrame += policyMode;
-    authFrame += F(" |\n");
-    authFrame += F("| try      : ");
-    authFrame += tryStr;
-    authFrame += F(" |\n");
-    authFrame += F("| cfgUser  : ");
-    authFrame += cfgUserStr;
-    authFrame += F(" |\n");
-    authFrame += F("| cfgPass  : ");
-    authFrame += cfgPassStr;
-    authFrame += F(" |\n");
-    authFrame += F("| userIn   : ");
-    authFrame += userInStr;
-    authFrame += F(" |\n");
-    authFrame += F("| passIn   : ");
-    authFrame += passInStr;
-    authFrame += F(" |\n");
-    if (!passLenStr.isEmpty())
-    {
-        authFrame += F("| passLen  : ");
-        authFrame += passLenStr;
+        String authFrame;
+        authFrame.reserve(256);
+        authFrame += F("[MQTT][AUTH][BROKER]\n");
+        authFrame += F("+------------------------------------------+\n");
+        authFrame += F("| clientId : ");
+        authFrame += clientId;
         authFrame += F(" |\n");
-    }
-    authFrame += F("+------------------------------------------+");
+        authFrame += F("| ip       : ");
+        authFrame += remoteIpStr;
+        authFrame += F(" |\n");
+        authFrame += F("| cfg      : ");
+        authFrame += policyMode;
+        authFrame += F(" |\n");
+        authFrame += F("| try      : ");
+        authFrame += tryStr;
+        authFrame += F(" |\n");
+        authFrame += F("| cfgUser  : ");
+        authFrame += cfgUserStr;
+        authFrame += F(" |\n");
+        authFrame += F("| cfgPass  : ");
+        authFrame += cfgPassStr;
+        authFrame += F(" |\n");
+        authFrame += F("| userIn   : ");
+        authFrame += userInStr;
+        authFrame += F(" |\n");
+        authFrame += F("| passIn   : ");
+        authFrame += passInStr;
+        authFrame += F(" |\n");
+        if (!passLenStr.isEmpty())
+        {
+            authFrame += F("| passLen  : ");
+            authFrame += passLenStr;
+            authFrame += F(" |\n");
+        }
+        authFrame += F("+------------------------------------------+");
 
-    logMessage(DEBUG_INFO, "%s", authFrame.c_str());
-    // --- Zusammenfassung (ohne Passwörter im Klartext) ---
+        logMessage(DEBUG_INFO, "%s", authFrame.c_str());
+        // --- Zusammenfassung (ohne Passwörter im Klartext) ---
 
-    logMessage(DEBUG_INFO, "--- MQTT Client Connect Info ---");
+        logMessage(DEBUG_INFO, "--- MQTT Client Connect Info ---");
 
-    logMessage(DEBUG_INFO, "ClientID      : %s", client->clientId.c_str());
+        logMessage(DEBUG_INFO, "ClientID      : %s", client->clientId.c_str());
 
-    logMessage(DEBUG_INFO, "Username      : '%s' (len=%u)", username.c_str(), (unsigned)username.length());
+        logMessage(DEBUG_INFO, "Username      : '%s' (len=%u)", username.c_str(), (unsigned)username.length());
 
-    logMessage(DEBUG_INFO, "Password      : %s (len=%u)", password.isEmpty() ? "<empty>" : "<set>", (unsigned)password.length());
+        logMessage(DEBUG_INFO, "Password      : %s (len=%u)", password.isEmpty() ? "<empty>" : "<set>", (unsigned)password.length());
 
-    logMessage(DEBUG_INFO, "Flags(usr/pwd): %d / %d", (int)usernameFlag, (int)passwordFlag);
+        logMessage(DEBUG_INFO, "Flags(usr/pwd): %d / %d", (int)usernameFlag, (int)passwordFlag);
 
-    logMessage(DEBUG_INFO, "CleanSession  : %s", cleanSession ? "true" : "false");
+        logMessage(DEBUG_INFO, "CleanSession  : %s", cleanSession ? "true" : "false");
 
-    logMessage(DEBUG_INFO, "KeepAlive     : %u", (unsigned)keepAlive);
+        logMessage(DEBUG_INFO, "KeepAlive     : %u", (unsigned)keepAlive);
 
-    logMessage(DEBUG_INFO, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
+        logMessage(DEBUG_INFO, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
 
-    logMessage(DEBUG_INFO, "--------------------------------");
+        logMessage(DEBUG_INFO, "--------------------------------");
     }
 
     // --- Authentifizierung ---
@@ -1514,12 +1513,12 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
             break;
         }
 
-    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
+        char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
 
-    memcpy(topicBuffer, data + index, topicLength);
-    topicBuffer[topicLength] = '\0';
+        memcpy(topicBuffer, data + index, topicLength);
+        topicBuffer[topicLength] = '\0';
 
-    String topic = String(topicBuffer);
+        String topic = String(topicBuffer);
 
         index += topicLength;
 
@@ -1660,12 +1659,12 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
             break;
         }
 
-    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
+        char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
 
-    memcpy(topicBuffer, data + index, topicLength);
-    topicBuffer[topicLength] = '\0';
+        memcpy(topicBuffer, data + index, topicLength);
+        topicBuffer[topicLength] = '\0';
 
-    String topic = String(topicBuffer);
+        String topic = String(topicBuffer);
 
         index += topicLength;
 
