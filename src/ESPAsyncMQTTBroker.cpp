@@ -1,4 +1,4 @@
-// ❤️ 📂 🎉❤️ endlich mehere cliens mqtt counter ❤️ 📂 🎉❤️️
+// ❤️ 📂 🎉❤️ endlich mehere cliens mqtt ❤️ 📂 🎉❤️️
 // @ 2.0.216
 
 #include "ESPAsyncMQTTBroker.h"
@@ -1161,6 +1161,8 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     }
 
     // --- AUTH-Log im Rahmenformat ---
+    if (brokerConfig.log && debugLevel >= DEBUG_INFO)
+    {
 
     String cfgUserStr = brokerConfig.username.isEmpty() ? "<empty>" : brokerConfig.username;
     String cfgPassStr = brokerConfig.password.isEmpty() ? "<empty>" : "<set>";
@@ -1233,6 +1235,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     logMessage(DEBUG_INFO, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
 
     logMessage(DEBUG_INFO, "--------------------------------");
+    }
 
     // --- Authentifizierung ---
 
@@ -1316,9 +1319,10 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         return;
     }
 
-    char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
+    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
 
     memcpy(topicBuffer, data + 2, topicLength);
+    topicBuffer[topicLength] = '\0';
 
     String topic = String(topicBuffer);
 
@@ -1510,11 +1514,12 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
             break;
         }
 
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
+    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
 
-        memcpy(topicBuffer, data + index, topicLength);
+    memcpy(topicBuffer, data + index, topicLength);
+    topicBuffer[topicLength] = '\0';
 
-        String topic = String(topicBuffer);
+    String topic = String(topicBuffer);
 
         index += topicLength;
 
@@ -1655,11 +1660,12 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, ui
             break;
         }
 
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE] = {0};
+    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
 
-        memcpy(topicBuffer, data + index, topicLength);
+    memcpy(topicBuffer, data + index, topicLength);
+    topicBuffer[topicLength] = '\0';
 
-        String topic = String(topicBuffer);
+    String topic = String(topicBuffer);
 
         index += topicLength;
 
