@@ -1,27 +1,12 @@
 {
   "name": "ESPAsyncMQTTBroker",
-  "version": "1.5.1",
-  "description": "An asynchronous MQTT broker for ESP32",
-  "keywords": "mqtt, broker, async, esp32",
+  "version": "1.9.42",
+  "description": "MQTT Broker für ESP32, asynchron und leichtgewichtig.",
+  "keywords": "mqtt, broker, esp32, async",
   "repository": {
     "type": "git",
     "url": "https://github.com/parip69/ESPAsyncMQTTBroker.git"
   },
-  "authors": [
-    {
-      "name": "parip69"
-    }
-  ],
-  "dependencies": [
-    {
-      "name": "AsyncTCP",
-      "platforms": "espressif32"
-    },
-    {
-      "name": "ArduinoJson",
-      "platforms": "espressif32"
-    }
-  ],
   "frameworks": "arduino",
   "platforms": "espressif32"
 }
