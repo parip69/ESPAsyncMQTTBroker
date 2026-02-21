@@ -159,7 +159,7 @@ void ESPAsyncMQTTBroker::begin()
     {
         ESPAsyncMQTTBroker *broker = (ESPAsyncMQTTBroker *)arg;
 
-        broker->checkTimeouts();
+        broker->checkTimeoutsFlag = true; // Nur Flag setzen, Verarbeitung in loop() (BP1-01)
     };
 
     timer_args.arg = this;
@@ -171,6 +171,15 @@ void ESPAsyncMQTTBroker::begin()
     esp_timer_create(&timer_args, &timeoutTimer);
 
     esp_timer_start_periodic(timeoutTimer, 1000000); // 1 second
+}
+
+void ESPAsyncMQTTBroker::loop()
+{
+    if (checkTimeoutsFlag)
+    {
+        checkTimeoutsFlag = false;
+        checkTimeouts();
+    }
 }
 
 void ESPAsyncMQTTBroker::stop()
@@ -1318,12 +1327,9 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
         return;
     }
 
-    char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
-
-    memcpy(topicBuffer, data + 2, topicLength);
-    topicBuffer[topicLength] = '\0';
-
-    String topic = String(topicBuffer);
+    // Topic direkt als String ohne 257-Byte Stack-Buffer konstruieren (BP1-03)
+    String topic;
+    topic.concat((const char *)(data + 2), topicLength);
 
     if (!isValidPublishTopic(topic))
 
@@ -1423,13 +1429,9 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
                 payloadLength = MQTT_MAX_PAYLOAD_SIZE;
             }
 
-            char payloadBuffer[MQTT_MAX_PAYLOAD_SIZE + 1] = {0};
-
-            memcpy(payloadBuffer, data + payloadOffset, payloadLength);
-
-            payloadBuffer[payloadLength] = 0;
-
-            String originalPayload = String(payloadBuffer);
+            // Payload direkt als String ohne 769-Byte Stack-Buffer konstruieren (BP1-03)
+            String originalPayload;
+            originalPayload.concat((const char *)(data + payloadOffset), payloadLength);
 
             // NEU: Payload mit Quelle-Präfix versehen
             String newPayload = "source:[" + client->clientId + "];" + originalPayload;
