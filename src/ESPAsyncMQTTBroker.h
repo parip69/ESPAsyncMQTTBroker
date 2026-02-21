@@ -209,12 +209,12 @@ struct IncomingQoS2Message
     }
 };
 
-typedef std::function<void(String clientId, String clientIp, String username, int passwordLen)> ClientCallback;
-typedef std::function<void(String clientId, String topic, String message)> MessageCallback;
-typedef std::function<void(String clientId)> ClientDisconnectCallback;
-typedef std::function<void(String clientId, int errorCode, const String &errorMessage)> ErrorCallback;
-typedef std::function<void(String clientId, const String &topic)> SubscribeCallback;
-typedef std::function<void(String clientId, const String &topic)> UnsubscribeCallback;
+typedef std::function<void(const String& clientId, const String& clientIp, const String& username, int passwordLen)> ClientCallback;
+typedef std::function<void(const String& clientId, const String& topic, const String& message)> MessageCallback;
+typedef std::function<void(const String& clientId)> ClientDisconnectCallback;
+typedef std::function<void(const String& clientId, int errorCode, const String& errorMessage)> ErrorCallback;
+typedef std::function<void(const String& clientId, const String& topic)> SubscribeCallback;
+typedef std::function<void(const String& clientId, const String& topic)> UnsubscribeCallback;
 typedef std::function<void(DebugLevel level, const String &message)> LoggingCallback;
 
 class ESPAsyncMQTTBroker
