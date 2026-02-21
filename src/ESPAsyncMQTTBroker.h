@@ -38,17 +38,7 @@
 #define MQTT_MAX_TOPIC_SIZE 256   // Maximale Größe für Topic
 #define MQTT_MAX_PAYLOAD_SIZE 768 // Maximale Größe für Payload
 
-// Eigene Implementation von std::make_unique (ab C++14 Standard)
-#if __cplusplus < 201402L
-namespace std
-{
-    template <typename T, typename... Args>
-    std::unique_ptr<T> make_unique(Args &&...args)
-    {
-        return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-    }
-}
-#endif
+// std::make_unique Polyfill entfernt (BP3-04) — C++17 stellt es nativ bereit
 
 /**
  * Debug-Level für Logging
@@ -96,7 +86,7 @@ struct MQTTClient
     bool hasWill = false;
     bool gracefulDisconnect = false;
     String willTopic;
-    String willMessage;
+    // willMessage entfernt (BP3-05) — nie verwendet, LWT nutzt willPayload
     uint8_t willQos = 0;
     bool willRetain = false;
     std::unique_ptr<uint8_t[]> willPayload;
