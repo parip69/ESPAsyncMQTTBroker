@@ -1,4 +1,4 @@
-// ❤️ 📂 🎉❤️ endlich mehere cliens mqtt counter ❤️ 📂 🎉❤️️
+// ❤️ 📂 🎉❤️ endlich mehere cliens mqtt ❤️ 📂 🎉❤️️
 // @ 2.0.216
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
@@ -85,28 +85,28 @@ struct Subscription
  */
 struct MQTTClient
 {
-    AsyncClient *client;
+    AsyncClient *client = nullptr;
     String clientId;
-    bool connected;
-    uint32_t lastActivity;
-    uint16_t keepAlive;
-    bool cleanSession;
+    bool connected = false;
+    uint32_t lastActivity = 0;
+    uint16_t keepAlive = 0;
+    bool cleanSession = true;
     std::vector<Subscription> subscriptions;
-    uint8_t protocolVersion;
-    bool hasWill;
-    bool gracefulDisconnect;
+    uint8_t protocolVersion = MQTT_PROTOCOL_LEVEL;
+    bool hasWill = false;
+    bool gracefulDisconnect = false;
     String willTopic;
     String willMessage;
-    uint8_t willQos;
-    bool willRetain;
+    uint8_t willQos = 0;
+    bool willRetain = false;
     std::unique_ptr<uint8_t[]> willPayload;
-    size_t willPayloadLen;
+    size_t willPayloadLen = 0;
 
     // For QoS 1/2 messages sent *to* this client
     std::map<uint16_t, struct OutgoingQoSMessage> outgoingMessages;
 
     // KeepAlive tracking
-    bool kaSeen;
+    bool kaSeen = false;
 };
 
 /**
@@ -224,6 +224,7 @@ public:
     ~ESPAsyncMQTTBroker();
     void begin();
     void stop();
+    void loop(); // Muss regelmaessig aus der Haupt-Loop aufgerufen werden (BP1-01)
     bool publish(const char *topic, const char *payload, bool retained = false, uint8_t qos = 0);
     bool publish(const char *topic, const char *payload, bool retained, uint8_t qos, const String &excludeClientId);
     bool publish(const char *topic, uint8_t qos, bool retained, const char *payload);
@@ -258,6 +259,7 @@ private:
     bool authNeedPassword = false;        // true wenn Passwort konfiguriert
     DebugLevel debugLevel = DEBUG_INFO;  // ← Wird im Konstruktor überschrieben mit BROKER_DEBUG_LEVEL!
     esp_timer_handle_t timeoutTimer = nullptr;
+    volatile bool checkTimeoutsFlag = false; // ISR-sicheres Flag fuer Timer-Callback (BP1-01)
     std::map<String, String> connectedClientsInfo;
     uint16_t nextPacketId = 1;
 
