@@ -469,6 +469,9 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
 
 
+            // Disconnect-Callback + Aufräumen in beiden Branches (BP2-05)
+            String disconnectedClientId = target->clientId; // Vor std::move sichern
+
             if (!target->cleanSession) {
 
 
@@ -497,23 +500,12 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
 
 
-                if (broker->clientDisconnectCallback) {
-
-
-
-                    broker->clientDisconnectCallback(target->clientId);
-
-
-
-                }
-
-
-
-                broker->connectedClientsInfo.erase(target->clientId);
-
-
-
             }
+
+            if (broker->clientDisconnectCallback) {
+                broker->clientDisconnectCallback(disconnectedClientId);
+            }
+            broker->connectedClientsInfo.erase(disconnectedClientId);
 
 
 
@@ -1272,17 +1264,17 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
 
     // Callback & Liste führen
 
-    if (clientConnectCallback)
-
     {
 
         IPAddress ip = client->client->remoteIP();
 
         String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
 
-        clientConnectCallback(client->clientId, ipStr, username, password.length());
+        connectedClientsInfo[client->clientId] = ipStr; // Immer aktualisieren, nicht nur bei Callback (BP2-06)
 
-        connectedClientsInfo[client->clientId] = ipStr;
+        if (clientConnectCallback) {
+            clientConnectCallback(client->clientId, ipStr, username, password.length());
+        }
     }
 
     // Retained Messages pushen
