@@ -2036,13 +2036,13 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                     continue;
                 }
 
-                size_t actualPayloadLength = msg->length;
+                size_t actualPayloadLength = msg->payload_len;
 
-                if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
+                if (msg->payload_len > MQTT_MAX_PAYLOAD_SIZE)
 
                 {
 
-                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
+                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->payload_len, MQTT_MAX_PAYLOAD_SIZE);
 
                     actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
                 }
@@ -2098,38 +2098,7 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
     }
 }
 
-bool ESPAsyncMQTTBroker::isUserAllowed(const String &username, const String &userList)
-{
-    if (username.isEmpty())
-        return false;
-    String userLower = username;
-    userLower.toLowerCase();
-    userLower.trim();
-
-    int currentIndex = 0;
-    int nextIndex = 0;
-    while ((nextIndex = userList.indexOf(',', currentIndex)) != -1)
-    {
-        String allowedUser = userList.substring(currentIndex, nextIndex);
-        allowedUser.toLowerCase();
-        allowedUser.trim();
-        if (allowedUser == userLower)
-        {
-            return true;
-        }
-        currentIndex = nextIndex + 1;
-    }
-
-    String lastUser = userList.substring(currentIndex);
-    lastUser.toLowerCase();
-    lastUser.trim();
-    if (lastUser == userLower)
-    {
-        return true;
-    }
-
-    return false;
-}
+// BP3-06: isUserAllowed() als toter Code entfernt
 
 bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String &password)
 {
