@@ -246,22 +246,45 @@ void ESPAsyncMQTTBroker::checkTimeouts()
                         outMsg.sentTime = now;
                         if (outMsg.state == OutgoingQoSState::AwaitingPuback || outMsg.state == OutgoingQoSState::AwaitingPubrec)
                         {
-                            // Resend PUBLISH with DUP flag
+                            // BP2-01: Resend PUBLISH with DUP flag — Variable-Length-Encoding für Remaining-Length
                             size_t topicLen = outMsg.topic.length();
                             size_t packet_id_len = 2;
                             size_t remainingLength = 2 + topicLen + packet_id_len + outMsg.payloadLen;
-                            size_t packetSize = 1 + 1 + remainingLength; // simple remaining length for now
+
+                            // Header-Länge berechnen (1 Byte Fixheader + Variable-Length-Bytes)
+                            size_t header_len = 1;
+                            if (remainingLength <= 127)
+                                header_len += 1;
+                            else if (remainingLength <= 16383)
+                                header_len += 2;
+                            else
+                                header_len += 3;
+
+                            size_t packetSize = header_len + remainingLength;
                             auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-                            packet[0] = (MQTT_PUBLISH << 4) | (outMsg.qos << 1) | (outMsg.retain ? 1 : 0) | 0x08; // Set DUP flag
-                            packet[1] = remainingLength;
-                            packet[2] = topicLen >> 8;
-                            packet[3] = topicLen & 0xFF;
-                            memcpy(packet.get() + 4, outMsg.topic.c_str(), topicLen);
-                            packet[4 + topicLen] = outMsg.packetId >> 8;
-                            packet[5 + topicLen] = outMsg.packetId & 0xFF;
+                            uint8_t *ptr = packet.get();
+                            *ptr++ = (MQTT_PUBLISH << 4) | (outMsg.qos << 1) | (outMsg.retain ? 1 : 0) | 0x08; // Set DUP flag
+
+                            // Variable-Length-Encoding
+                            size_t rem_len = remainingLength;
+                            do
+                            {
+                                uint8_t byte = rem_len % 128;
+                                rem_len /= 128;
+                                if (rem_len > 0)
+                                    byte |= 128;
+                                *ptr++ = byte;
+                            } while (rem_len > 0);
+
+                            *ptr++ = topicLen >> 8;
+                            *ptr++ = topicLen & 0xFF;
+                            memcpy(ptr, outMsg.topic.c_str(), topicLen);
+                            ptr += topicLen;
+                            *ptr++ = outMsg.packetId >> 8;
+                            *ptr++ = outMsg.packetId & 0xFF;
                             if (outMsg.payloadLen > 0)
                             {
-                                memcpy(packet.get() + 6 + topicLen, outMsg.payload.get(), outMsg.payloadLen);
+                                memcpy(ptr, outMsg.payload.get(), outMsg.payloadLen);
                             }
                             mqttClient->client->write((const char *)packet.get(), packetSize);
                         }
@@ -471,6 +494,21 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
             // Disconnect-Callback + Aufräumen in beiden Branches (BP2-05)
             String disconnectedClientId = target->clientId; // Vor std::move sichern
+
+            // BP2-03: Pending QoS2-Nachrichten des disconnecting Clients aufräumen
+            for (auto qIt = broker->incomingQoS2Messages.begin(); qIt != broker->incomingQoS2Messages.end();)
+            {
+                if (qIt->second.senderClientId == disconnectedClientId)
+                {
+                    broker->logMessage(DEBUG_DEBUG, "QoS2 message (packetId %u) from disconnected client '%s' discarded.",
+                                       qIt->first, disconnectedClientId.c_str());
+                    qIt = broker->incomingQoS2Messages.erase(qIt);
+                }
+                else
+                {
+                    ++qIt;
+                }
+            }
 
             if (!target->cleanSession) {
 
@@ -1523,13 +1561,25 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
 
         {
 
-            Subscription sub;
-
-            sub.filter = topic;
-
-            sub.noLocal = noLocal;
-
-            client->subscriptions.push_back(sub);
+            // BP2-04: Doppelte Subscriptions verhindern — MQTT-Spec erlaubt Update, nicht doppeln
+            bool found = false;
+            for (auto &existing : client->subscriptions)
+            {
+                if (existing.filter == topic)
+                {
+                    existing.noLocal = noLocal; // QoS/Flags aktualisieren
+                    found = true;
+                    logMessage(DEBUG_DEBUG, "Subscription for client '%s' to topic '%s' updated (noLocal %s).", client->clientId.c_str(), topic.c_str(), noLocal ? "Yes" : "No");
+                    break;
+                }
+            }
+            if (!found)
+            {
+                Subscription sub;
+                sub.filter = topic;
+                sub.noLocal = noLocal;
+                client->subscriptions.push_back(sub);
+            }
 
             returnCodes.push_back(requestedQoS);
 
@@ -2038,16 +2088,16 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 
                 size_t remainingLengthField = 2 + topicLength + actualPayloadLength;
 
-                size_t totalPacketLength = 1 + 1 + remainingLengthField;
+                // BP2-02: Variable-Length-Encoding statt 1-Byte-Limit
+                size_t header_len = 1; // Fixed header byte
+                if (remainingLengthField <= 127)
+                    header_len += 1;
+                else if (remainingLengthField <= 16383)
+                    header_len += 2;
+                else
+                    header_len += 3;
 
-                if (remainingLengthField > 127)
-
-                {
-
-                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) too large for simple Remaining Length encoding: %u.", msg->topic.c_str(), (unsigned)remainingLengthField);
-
-                    continue;
-                }
+                size_t totalPacketLength = header_len + remainingLengthField;
 
                 if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
 
@@ -2060,21 +2110,31 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 
                 std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
 
-                packet[0] = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01;
+                uint8_t *ptr = packet.get();
+                *ptr++ = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01;
 
-                packet[1] = (uint8_t)remainingLengthField;
+                // Variable-Length-Encoding
+                size_t rem_len = remainingLengthField;
+                do
+                {
+                    uint8_t byte = rem_len % 128;
+                    rem_len /= 128;
+                    if (rem_len > 0)
+                        byte |= 128;
+                    *ptr++ = byte;
+                } while (rem_len > 0);
 
-                packet[2] = topicLength >> 8;
+                *ptr++ = topicLength >> 8;
+                *ptr++ = topicLength & 0xFF;
 
-                packet[3] = topicLength & 0xFF;
-
-                memcpy(packet.get() + 4, msg->topic.c_str(), topicLength);
+                memcpy(ptr, msg->topic.c_str(), topicLength);
+                ptr += topicLength;
 
                 if (actualPayloadLength > 0 && msg->payload)
 
                 {
 
-                    memcpy(packet.get() + 4 + topicLength, msg->payload.get(), actualPayloadLength);
+                    memcpy(ptr, msg->payload.get(), actualPayloadLength);
                 }
 
                 client->client->write((const char *)packet.get(), totalPacketLength);
