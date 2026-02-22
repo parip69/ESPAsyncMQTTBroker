@@ -1216,25 +1216,16 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
         authFrame += F("+------------------------------------------+");
 
         logMessage(DEBUG_INFO, "%s", authFrame.c_str());
-        // --- Zusammenfassung (ohne Passwörter im Klartext) ---
-
-        logMessage(DEBUG_INFO, "--- MQTT Client Connect Info ---");
-
-        logMessage(DEBUG_INFO, "ClientID      : %s", client->clientId.c_str());
-
-        logMessage(DEBUG_INFO, "Username      : '%s' (len=%u)", username.c_str(), (unsigned)username.length());
-
-        logMessage(DEBUG_INFO, "Password      : %s (len=%u)", password.isEmpty() ? "<empty>" : "<set>", (unsigned)password.length());
-
-        logMessage(DEBUG_INFO, "Flags(usr/pwd): %d / %d", (int)usernameFlag, (int)passwordFlag);
-
-        logMessage(DEBUG_INFO, "CleanSession  : %s", cleanSession ? "true" : "false");
-
-        logMessage(DEBUG_INFO, "KeepAlive     : %u", (unsigned)keepAlive);
-
-        logMessage(DEBUG_INFO, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
-
-        logMessage(DEBUG_INFO, "--------------------------------");
+        // BP3-01: Zusammenfassung nur bei DEBUG_DEBUG (Auth-Frame oben enthält bereits alle Infos)
+        logMessage(DEBUG_DEBUG, "--- MQTT Client Connect Info ---");
+        logMessage(DEBUG_DEBUG, "ClientID      : %s", client->clientId.c_str());
+        logMessage(DEBUG_DEBUG, "Username      : '%s' (len=%u)", username.c_str(), (unsigned)username.length());
+        logMessage(DEBUG_DEBUG, "Password      : %s (len=%u)", password.isEmpty() ? "<empty>" : "<set>", (unsigned)password.length());
+        logMessage(DEBUG_DEBUG, "Flags(usr/pwd): %d / %d", (int)usernameFlag, (int)passwordFlag);
+        logMessage(DEBUG_DEBUG, "CleanSession  : %s", cleanSession ? "true" : "false");
+        logMessage(DEBUG_DEBUG, "KeepAlive     : %u", (unsigned)keepAlive);
+        logMessage(DEBUG_DEBUG, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
+        logMessage(DEBUG_DEBUG, "--------------------------------");
     }
 
     // --- Authentifizierung ---
@@ -1859,13 +1850,11 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
         {
 
-            char tempPayload[msg.payload_len + 1];
-
-            memcpy(tempPayload, msg.payload.get(), msg.payload_len);
-
+            // BP3-02: VLA durch Heap-Allokation ersetzt (VLA ist kein Standard-C++)
+            std::unique_ptr<char[]> tempPayload(new char[msg.payload_len + 1]);
+            memcpy(tempPayload.get(), msg.payload.get(), msg.payload_len);
             tempPayload[msg.payload_len] = '\0';
-
-            payloadStr = String(tempPayload);
+            payloadStr = String(tempPayload.get());
         }
 
         else
