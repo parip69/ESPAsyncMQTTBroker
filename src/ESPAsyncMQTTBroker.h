@@ -181,16 +181,15 @@ struct IncomingQoS2Message
 {
     String topic;
     std::unique_ptr<uint8_t[]> payload;
-    size_t length;
-    size_t payload_len;
+    size_t payload_len; // BP3-07: Einziges Größenfeld (vorher doppelt mit 'length')
     bool retained;
     String senderClientId;
     String originalClientId;
 
-    IncomingQoS2Message() : length(0), payload_len(0), retained(false) {}
+    IncomingQoS2Message() : payload_len(0), retained(false) {}
 
     IncomingQoS2Message(const String &t, const uint8_t *p, size_t len, bool ret, const String &clientId)
-        : topic(t), length(len), payload_len(len), retained(ret), senderClientId(clientId), originalClientId(clientId)
+        : topic(t), payload_len(len), retained(ret), senderClientId(clientId), originalClientId(clientId)
     {
         if (len > 0 && p != nullptr)
         {
@@ -202,7 +201,6 @@ struct IncomingQoS2Message
             else
             {
                 memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
-                length = MQTT_MAX_PAYLOAD_SIZE;
                 payload_len = MQTT_MAX_PAYLOAD_SIZE;
             }
         }
@@ -237,7 +235,8 @@ public:
     void onError(ErrorCallback callback) { errorCallback = callback; }
     void onSubscribe(SubscribeCallback callback) { subscribeCallback = callback; }
     void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
-    std::map<String, String> getConnectedClientsInfo() const { return connectedClientsInfo; }
+    // BP3-03: Const-Referenz statt Kopie zurückgeben
+    const std::map<String, String>& getConnectedClientsInfo() const { return connectedClientsInfo; }
 
     // ---- Connected-Clients API (für UI/Status ohne separaten Zähler) ----
     // Gibt die Anzahl aktuell als "connected" markierter Sessions zurück.
@@ -294,7 +293,7 @@ private:
     bool isValidPublishTopic(const String &topic);
     bool isValidTopicFilter(const String &filter);
     bool publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId);
-    bool isUserAllowed(const String &username, const String &userList);
+    // BP3-06: isUserAllowed() als toter Code entfernt
 };
 
 #endif // ESP_ASYNC_MQTT_BROKER_H
