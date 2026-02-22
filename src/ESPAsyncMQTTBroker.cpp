@@ -2036,13 +2036,13 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                     continue;
                 }
 
-                size_t actualPayloadLength = msg->payload_len;
+                size_t actualPayloadLength = msg->length;
 
-                if (msg->payload_len > MQTT_MAX_PAYLOAD_SIZE)
+                if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
 
                 {
 
-                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->payload_len, MQTT_MAX_PAYLOAD_SIZE);
+                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
 
                     actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
                 }
