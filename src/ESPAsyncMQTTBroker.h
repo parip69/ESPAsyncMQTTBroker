@@ -34,7 +34,7 @@
 // Andere Konstanten
 #define MQTT_PROTOCOL_LEVEL 4   // MQTT 3.1.1
 #define MQTT_PROTOCOL_LEVEL_5 5 // MQTT 5.0
-#define MQTT_MAX_PACKET_SIZE 1024
+#define MQTT_MAX_PACKET_SIZE 1280  // BP2-07: 1024→1280 damit Retained Messages mit Topic+Payload >127 Bytes Remaining-Length sicher passen
 #define MQTT_MAX_TOPIC_SIZE 256   // Maximale Größe für Topic
 #define MQTT_MAX_PAYLOAD_SIZE 768 // Maximale Größe für Payload
 
