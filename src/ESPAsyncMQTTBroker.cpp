@@ -5,6 +5,12 @@
 
 #include <cstdarg>
 
+// B1: Composite-Key für clientbezogene QoS2-Zuordnung
+static inline String makeQoS2Key(const String &clientId, uint16_t packetId)
+{
+    return clientId + "|" + String(packetId);
+}
+
 // Hilfsfunktion für CONNACK + Close
 
 static inline void sendConnackAndClose(MQTTClient *client, uint8_t returnCode)
@@ -500,8 +506,8 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
             {
                 if (qIt->second.senderClientId == disconnectedClientId)
                 {
-                    broker->logMessage(DEBUG_DEBUG, "QoS2 message (packetId %u) from disconnected client '%s' discarded.",
-                                       qIt->first, disconnectedClientId.c_str());
+                    broker->logMessage(DEBUG_DEBUG, "QoS2 message (key '%s') from disconnected client '%s' discarded.",
+                                       qIt->first.c_str(), disconnectedClientId.c_str());
                     qIt = broker->incomingQoS2Messages.erase(qIt);
                 }
                 else
@@ -1415,7 +1421,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
             IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
 
-            incomingQoS2Messages[packetId] = std::move(qos2Msg);
+            incomingQoS2Messages[makeQoS2Key(client->clientId, packetId)] = std::move(qos2Msg);
 
             logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
 
@@ -1886,7 +1892,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
     uint16_t packetId = (data[0] << 8) | data[1];
 
-    auto it = incomingQoS2Messages.find(packetId);
+    auto it = incomingQoS2Messages.find(makeQoS2Key(client->clientId, packetId));
 
     if (it != incomingQoS2Messages.end())
 

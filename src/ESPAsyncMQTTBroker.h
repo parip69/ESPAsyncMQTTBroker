@@ -249,7 +249,8 @@ private:
     std::map<AsyncClient *, std::unique_ptr<MQTTClient>> clients;
     std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
-    std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages;
+    // B1: Schlüssel = clientId + "|" + packetId, damit packetIds verschiedener Clients nicht kollidieren
+    std::map<String, IncomingQoS2Message> incomingQoS2Messages;
     ESPAsyncMQTTBrokerConfig brokerConfig;
 
     // ---- Auth Cache (einmalig in setConfig() aufbauen) ----
