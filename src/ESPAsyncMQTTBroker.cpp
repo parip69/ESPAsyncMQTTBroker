@@ -495,20 +495,9 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
             // Disconnect-Callback + Aufräumen in beiden Branches (BP2-05)
             String disconnectedClientId = target->clientId; // Vor std::move sichern
 
-            // BP2-03: Pending QoS2-Nachrichten des disconnecting Clients aufräumen
-            for (auto qIt = broker->incomingQoS2Messages.begin(); qIt != broker->incomingQoS2Messages.end();)
-            {
-                if (qIt->second.senderClientId == disconnectedClientId)
-                {
-                    broker->logMessage(DEBUG_DEBUG, "QoS2 message (packetId %u) from disconnected client '%s' discarded.",
-                                       qIt->first, disconnectedClientId.c_str());
-                    qIt = broker->incomingQoS2Messages.erase(qIt);
-                }
-                else
-                {
-                    ++qIt;
-                }
-            }
+            // QoS2-Eingangs-State liegt jetzt im MQTTClient.
+            // Bei cleanSession wird er mit dem Client zerstört.
+            // Bei persistenter Session bleibt er zusammen mit dem Client erhalten.
 
             if (!target->cleanSession) {
 
@@ -734,7 +723,7 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
     }
 }
 
-void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32_t length)
+void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t length)
 {
     logMessage(DEBUG_DEBUG, "🔍 MQTT CONNECT Paket empfangen (len=%u)", length);
     if (length < 10)
@@ -1311,7 +1300,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, uint32
     sendRetainedMessages(client);
 }
 
-void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32_t length, uint8_t header)
+void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t length, uint8_t header)
 
 {
 
@@ -1415,7 +1404,8 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
 
             IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
 
-            incomingQoS2Messages[packetId] = std::move(qos2Msg);
+            // packetId ist nur pro Verbindung eindeutig, daher Ablage pro Client
+            client->incomingQoS2Messages[packetId] = std::move(qos2Msg);
 
             logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
 
@@ -1492,7 +1482,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, uint32
     }
 }
 
-void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint32_t length)
+void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size_t length)
 
 {
 
@@ -1648,7 +1638,7 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, uint
     sendRetainedMessages(client);
 }
 
-void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, uint32_t length)
+void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, size_t length)
 
 {
 
@@ -1886,9 +1876,9 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
     uint16_t packetId = (data[0] << 8) | data[1];
 
-    auto it = incomingQoS2Messages.find(packetId);
+    auto it = client->incomingQoS2Messages.find(packetId);
 
-    if (it != incomingQoS2Messages.end())
+    if (it != client->incomingQoS2Messages.end())
 
     {
 
@@ -1918,7 +1908,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
         publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2, msg.originalClientId);
 
-        incomingQoS2Messages.erase(it);
+        client->incomingQoS2Messages.erase(it);
     }
 
     else
