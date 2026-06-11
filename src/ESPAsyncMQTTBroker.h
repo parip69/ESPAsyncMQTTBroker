@@ -105,6 +105,10 @@ struct MQTTClient
     // For QoS 1/2 messages sent *to* this client
     std::map<uint16_t, struct OutgoingQoSMessage> outgoingMessages;
 
+    // QoS2-Eingangs-State pro Client statt global,
+    // weil packetId nur pro Verbindung eindeutig ist.
+    std::map<uint16_t, struct IncomingQoS2Message> incomingQoS2Messages;
+
     // KeepAlive tracking
     bool kaSeen = false;
 };

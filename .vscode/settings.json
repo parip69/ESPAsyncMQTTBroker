@@ -16,5 +16,9 @@
         "memory": "cpp",
         "functional": "cpp"
     },
-    "C_Cpp.dimInactiveRegions": false
+    "C_Cpp.dimInactiveRegions": false,
+    "clangd.arguments": [
+        "--compile-commands-dir=d:/!FingerPrint/###1AMeinBrockerOriginal/ESPAsyncMQTTBroker/.cache/clangd",
+        "--query-driver=C:/Users/gerha/.platformio/packages/toolchain-*/bin/*,C:/Users/gerha/.platformio/packages/tool-*/bin/*"
+    ]
 }
