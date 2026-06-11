@@ -1404,8 +1404,8 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
 
-            // QoS2-Nachricht bis PUBREL zwischenspeichern
-            incomingQoS2Messages[packetId] = std::move(qos2Msg);
+            // packetId ist nur pro Verbindung eindeutig, daher Ablage pro Client
+            client->incomingQoS2Messages[packetId] = std::move(qos2Msg);
 
             logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
 
@@ -1454,14 +1454,14 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             logMessage(DEBUG_INFO, "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', NeuerPayload='%s'", qos, client->clientId.c_str(), topic.c_str(), newPayload.c_str());
 
+            publish(topic.c_str(), newPayload.c_str(), retained, qos, client->clientId);
+
             if (messageCallback)
 
             {
 
                 messageCallback(client->clientId, topic, newPayload);
             }
-
-            publish(topic.c_str(), newPayload.c_str(), retained, qos, client->clientId);
         }
 
         else if (retained)
@@ -1470,14 +1470,14 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             logMessage(DEBUG_INFO, "Publish (QoS %d, empty Retained) - Topic='%s'", qos, topic.c_str());
 
+            publish(topic.c_str(), "", retained, qos, client->clientId);
+
             if (messageCallback)
 
             {
 
                 messageCallback(client->clientId, topic, "");
             }
-
-            publish(topic.c_str(), "", retained, qos, client->clientId);
         }
     }
 }
@@ -1876,9 +1876,9 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
     uint16_t packetId = (data[0] << 8) | data[1];
 
-    auto it = incomingQoS2Messages.find(packetId);
+    auto it = client->incomingQoS2Messages.find(packetId);
 
-    if (it != incomingQoS2Messages.end())
+    if (it != client->incomingQoS2Messages.end())
 
     {
 
@@ -1908,7 +1908,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
         publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2, msg.originalClientId);
 
-        incomingQoS2Messages.erase(it);
+        client->incomingQoS2Messages.erase(it);
     }
 
     else
@@ -2688,4 +2688,3 @@ bool ESPAsyncMQTTBroker::isValidTopicFilter(const String &filter)
 
     return true;
 }
-
