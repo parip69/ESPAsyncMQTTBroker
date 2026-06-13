@@ -80,6 +80,8 @@ struct Subscription
     // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 
+struct IncomingQoS2Message;
+
 /**
  * Repräsentiert einen verbundenen MQTT-Client
  */
@@ -92,6 +94,7 @@ struct MQTTClient
     uint16_t keepAlive = 0;
     bool cleanSession = true;
     std::vector<Subscription> subscriptions;
+    std::vector<uint8_t> rxBuffer;
     uint8_t protocolVersion = MQTT_PROTOCOL_LEVEL;
     bool hasWill = false;
     bool gracefulDisconnect = false;
@@ -253,7 +256,7 @@ private:
     std::map<AsyncClient *, std::unique_ptr<MQTTClient>> clients;
     std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
     std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
-    std::map<uint16_t, IncomingQoS2Message> incomingQoS2Messages;
+    // incomingQoS2Messages liegt jetzt im MQTTClient (per-Client statt global)
     ESPAsyncMQTTBrokerConfig brokerConfig;
 
     // ---- Auth Cache (einmalig in setConfig() aufbauen) ----
