@@ -23,3 +23,8 @@ Thumbs.db
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch/
+
+# Lokale Maschinen-/Tooling-Dateien
+.gitconfig
+compile_commands.json
+.cache/
