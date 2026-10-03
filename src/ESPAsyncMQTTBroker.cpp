@@ -1,5 +1,5 @@
 ﻿// ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️
-// @ 2.0.216
+// @ 2.0.217
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -1495,23 +1495,19 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
             String originalPayload;
             originalPayload.concat((const char *)(data + payloadOffset), payloadLength);
 
-            // NEU: Payload mit Quelle-Präfix versehen
-            String newPayload = "source:[" + client->clientId + "];" + originalPayload;
-            if (newPayload.length() > MQTT_MAX_PAYLOAD_SIZE)
-            {
-                logMessage(DEBUG_WARNING, "Payload mit Source-Präfix überschreitet die maximale Größe und wird gekürzt.");
-                newPayload = newPayload.substring(0, MQTT_MAX_PAYLOAD_SIZE);
-            }
+            // Payload unverändert weiterleiten.
+            // Die Herkunft des MQTT-Clients bleibt separat über client->clientId
+            // im Callback/Logging verfügbar. Strukturierte Herkunftsdaten wie
+            // source/device bleiben Bestandteil des vom Publisher erzeugten JSON.
+            logMessage(DEBUG_INFO, "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', Payload='%s'", qos, client->clientId.c_str(), topic.c_str(), originalPayload.c_str());
 
-            logMessage(DEBUG_INFO, "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', NeuerPayload='%s'", qos, client->clientId.c_str(), topic.c_str(), newPayload.c_str());
-
-            publish(topic.c_str(), newPayload.c_str(), retained, qos, client->clientId);
+            publish(topic.c_str(), originalPayload.c_str(), retained, qos, client->clientId);
 
             if (messageCallback)
 
             {
 
-                messageCallback(client->clientId, topic, newPayload);
+                messageCallback(client->clientId, topic, originalPayload);
             }
         }
 
