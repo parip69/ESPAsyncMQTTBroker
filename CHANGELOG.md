@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.0.220 - Oktober 2026
+- Reine Aufräum- und Dokumentationsversion ohne Änderung des Laufzeitverhaltens
+- `ignoreLoopDeliver` im Code und in der Dokumentation klar als aktuell nicht ausgewertet markiert
+- `noLocal`-Kommentare an den tatsächlichen Stand angepasst: wird gespeichert, aber bei der Zustellung noch nicht ausgewertet
+- Kommentar bei `final_qos = qos` korrigiert: Subscription-QoS wird aktuell noch nicht gespeichert oder berücksichtigt
+- README um eine Übersicht zu unterstützten, teilweise unterstützten und noch nicht umgesetzten Funktionen ergänzt
+- Versionsstände auf 2.0.220 vereinheitlicht
+- Keine Änderung an QoS-Verteilung, `noLocal`-Logik, `ignoreLoopDeliver`, öffentlicher API oder Projektstruktur
+
 ## v2.0.219 - Oktober 2026
 - Leere MQTT-Payloads werden jetzt auch bei `retain=false` korrekt weitergeleitet und an `onMessage` gemeldet
 - INFO-Logging zeigt nur Metadaten und Payload-Länge; vollständige Payload nur noch bei `DEBUG_DEBUG`

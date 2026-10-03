@@ -1,5 +1,5 @@
 // ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️️
-// @ 2.0.219
+// @ 2.0.220
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -76,7 +76,7 @@ enum DebugLevel
 struct Subscription
 {
     String filter;        ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
-    bool noLocal = false; ///< Sicherer Default; bestehendes Verhalten bleibt unverändert
+    bool noLocal = false; ///< Wird beim SUBSCRIBE gespeichert; bei der Zustellung aktuell noch nicht ausgewertet
     // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 
@@ -180,7 +180,7 @@ struct ESPAsyncMQTTBrokerConfig
 {
     String username = "";
     String password = "";
-    bool ignoreLoopDeliver = false;
+    bool ignoreLoopDeliver = false; ///< Konfigurationsfeld vorhanden; aktuell noch nicht ausgewertet (keine Laufzeitwirkung)
     bool log = true;
 };
 

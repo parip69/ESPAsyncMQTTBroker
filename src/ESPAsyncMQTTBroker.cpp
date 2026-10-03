@@ -1,4 +1,4 @@
-// @ 2.0.219
+// @ 2.0.220
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -2492,7 +2492,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
 
             {
 
-                uint8_t final_qos = qos; // We could downgrade QoS here based on subscription, but for now use original.
+                uint8_t final_qos = qos; // Aktuell wird nur der Publish-QoS verwendet; Subscription-QoS wird noch nicht gespeichert/berücksichtigt.
 
                 size_t packet_id_len = (final_qos > 0) ? 2 : 0;
 
