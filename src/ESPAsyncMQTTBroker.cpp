@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-﻿// ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️
-=======
-// ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️
->>>>>>> 45bf2caafbae9a38bd305ad8fa57664476f5d03d
 // @ 2.0.217
 
 #include "ESPAsyncMQTTBroker.h"
