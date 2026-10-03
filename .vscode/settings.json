@@ -1,0 +1,22 @@
+{
+  "C_Cpp.errorSquiggles": "disabled",
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.autocomplete": "default",
+  "C_Cpp.loggingLevel": "None",
+  "files.associations": {
+    "*.c": "c",
+    "*.cc": "cpp",
+    "*.cpp": "cpp",
+    "*.cxx": "cpp",
+    "*.h": "cpp",
+    "*.hh": "cpp",
+    "*.hpp": "cpp",
+    "*.tcc": "cpp"
+  },
+  "files.exclude": {
+    "**/.pio": true
+  },
+  "search.exclude": {
+    "**/.pio": true
+  }
+}
