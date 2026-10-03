@@ -1,5 +1,5 @@
 // ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️️
-// @ 2.0.218
+// @ 2.0.219
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -75,8 +75,8 @@ enum DebugLevel
  */
 struct Subscription
 {
-    String filter; ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
-    bool noLocal;  ///< MQTT 5.0 noLocal-Flag: Bei true erhält der Client keine selbst veröffentlichten Nachrichten
+    String filter;        ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
+    bool noLocal = false; ///< Sicherer Default; bestehendes Verhalten bleibt unverändert
     // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 

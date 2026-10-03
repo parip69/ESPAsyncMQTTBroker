@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.219 - Oktober 2026
+- Leere MQTT-Payloads werden jetzt auch bei `retain=false` korrekt weitergeleitet und an `onMessage` gemeldet
+- INFO-Logging zeigt nur Metadaten und Payload-Länge; vollständige Payload nur noch bei `DEBUG_DEBUG`
+- `Subscription::noLocal` erhält den sicheren Defaultwert `false`
+- Keine Änderung an QoS-Verteilung, `noLocal`-Auswertung, `ignoreLoopDeliver` oder öffentlicher API
+
 ## v2.0.218 - Oktober 2026
 - Versionsstände in Quellcode und Bibliotheksmetadaten vereinheitlicht
 - README an die aktuelle `onMessage(clientId, topic, payload)`-API angepasst

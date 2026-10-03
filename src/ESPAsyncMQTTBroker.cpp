@@ -1,4 +1,4 @@
-// @ 2.0.218
+// @ 2.0.219
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -1443,87 +1443,52 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             uint32_t payloadLength = length - payloadOffset;
 
-            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
+        if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
 
-            {
+        {
 
-                logMessage(DEBUG_WARNING, "QoS 2 Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
+            logMessage(DEBUG_WARNING, "Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
 
-                payloadLength = MQTT_MAX_PAYLOAD_SIZE;
-            }
-
-            IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
-
-            // packetId ist nur pro Verbindung eindeutig, daher Ablage pro Client
-            client->incomingQoS2Messages[packetId] = std::move(qos2Msg);
-
-            logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
-
-            uint8_t pubrec[] = {(MQTT_PUBREC << 4), 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
-
-            client->client->write((const char *)pubrec, 4);
-
-            return;
+            payloadLength = MQTT_MAX_PAYLOAD_SIZE;
         }
-    }
 
-    // Verteilung der Nachricht an Abonnenten für QoS 0 und QoS 1.
-
-    // (QoS 2 wird erst nach Abschluss des Handshakes in handlePubRel verteilt.)
-
-    if (qos == 0 || qos == 1)
-
-    {
-
-        uint32_t payloadLength = length - payloadOffset;
+        // Payload direkt als String ohne grossen Stack-Buffer konstruieren.
+        // Auch eine leere MQTT-Payload wird korrekt weitergeleitet und
+        // an den Message-Callback gemeldet.
+        String originalPayload;
 
         if (payloadLength > 0)
 
         {
 
-            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
-
-            {
-
-                logMessage(DEBUG_WARNING, "Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
-
-                payloadLength = MQTT_MAX_PAYLOAD_SIZE;
-            }
-
-            // Payload direkt als String ohne 769-Byte Stack-Buffer konstruieren (BP1-03)
-            String originalPayload;
             originalPayload.concat((const char *)(data + payloadOffset), payloadLength);
-
-            // Payload unverändert weiterleiten.
-            // Die Herkunft des MQTT-Clients bleibt separat über client->clientId
-            // im Callback/Logging verfügbar. Strukturierte Herkunftsdaten wie
-            // source/device bleiben Bestandteil des vom Publisher erzeugten JSON.
-            logMessage(DEBUG_INFO, "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', Payload='%s'", qos, client->clientId.c_str(), topic.c_str(), originalPayload.c_str());
-
-            publish(topic.c_str(), originalPayload.c_str(), retained, qos, client->clientId);
-
-            if (messageCallback)
-
-            {
-
-                messageCallback(client->clientId, topic, originalPayload);
-            }
         }
 
-        else if (retained)
+        // INFO bleibt kompakt: keine komplette Nutzlast im normalen Log.
+        logMessage(
+            DEBUG_INFO,
+            "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', PayloadLen=%u, Retained=%s",
+            qos,
+            client->clientId.c_str(),
+            topic.c_str(),
+            (unsigned)payloadLength,
+            retained ? "Yes" : "No"
+        );
+
+        // Vollständige Payload nur im ausführlichen Debug-Level.
+        logMessage(
+            DEBUG_DEBUG,
+            "Payload='%s'",
+            originalPayload.c_str()
+        );
+
+        publish(topic.c_str(), originalPayload.c_str(), retained, qos, client->clientId);
+
+        if (messageCallback)
 
         {
 
-            logMessage(DEBUG_INFO, "Publish (QoS %d, empty Retained) - Topic='%s'", qos, topic.c_str());
-
-            publish(topic.c_str(), "", retained, qos, client->clientId);
-
-            if (messageCallback)
-
-            {
-
-                messageCallback(client->clientId, topic, "");
-            }
+            messageCallback(client->clientId, topic, originalPayload);
         }
     }
 }
