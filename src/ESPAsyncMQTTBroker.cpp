@@ -1443,6 +1443,40 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             uint32_t payloadLength = length - payloadOffset;
 
+            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
+
+            {
+
+                logMessage(DEBUG_WARNING, "QoS 2 Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
+
+                payloadLength = MQTT_MAX_PAYLOAD_SIZE;
+            }
+
+            IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
+
+            // packetId ist nur pro Verbindung eindeutig, daher Ablage pro Client
+            client->incomingQoS2Messages[packetId] = std::move(qos2Msg);
+
+            logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
+
+            uint8_t pubrec[] = {(MQTT_PUBREC << 4), 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
+
+            client->client->write((const char *)pubrec, 4);
+
+            return;
+        }
+    }
+
+    // Verteilung der Nachricht an Abonnenten für QoS 0 und QoS 1.
+
+    // (QoS 2 wird erst nach Abschluss des Handshakes in handlePubRel verteilt.)
+
+    if (qos == 0 || qos == 1)
+
+    {
+
+        uint32_t payloadLength = length - payloadOffset;
+
         if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
 
         {
@@ -1452,9 +1486,8 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
             payloadLength = MQTT_MAX_PAYLOAD_SIZE;
         }
 
-        // Payload direkt als String ohne grossen Stack-Buffer konstruieren.
-        // Auch eine leere MQTT-Payload wird korrekt weitergeleitet und
-        // an den Message-Callback gemeldet.
+        // Payload direkt als String konstruieren.
+        // Auch leere MQTT-Payloads werden korrekt weitergeleitet.
         String originalPayload;
 
         if (payloadLength > 0)
@@ -1464,7 +1497,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
             originalPayload.concat((const char *)(data + payloadOffset), payloadLength);
         }
 
-        // INFO bleibt kompakt: keine komplette Nutzlast im normalen Log.
+        // Normales INFO-Log bleibt kompakt.
         logMessage(
             DEBUG_INFO,
             "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', PayloadLen=%u, Retained=%s",
@@ -1475,7 +1508,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
             retained ? "Yes" : "No"
         );
 
-        // Vollständige Payload nur im ausführlichen Debug-Level.
+        // Vollständige Nutzlast nur im ausführlichen Debug-Level.
         logMessage(
             DEBUG_DEBUG,
             "Payload='%s'",
@@ -1490,6 +1523,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             messageCallback(client->clientId, topic, originalPayload);
         }
+
     }
 }
 
