@@ -2,13 +2,13 @@
 
 # ESPAsyncMQTTBroker
 
-Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `ESPAsyncWebServer`.
+Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 
 ## Features
 
 - MQTT-Broker läuft direkt auf dem ESP32
 - Volle Kontrolle über Topics, Clients und Nachrichten
-- Optionales Webinterface zur Anzeige verbundener Clients und empfangener Nachrichten
+- Callback-Schnittstellen für Clients, Nachrichten, Fehler und Subscriptions
 - Keine Internetverbindung erforderlich – funktioniert komplett lokal
 - Kompatibel mit PlatformIO und dem Arduino-Framework
 
@@ -20,7 +20,7 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `ESPAsyncWebServer`.
 
 ### PlatformIO
 ```ini
-lib_deps = 
+lib_deps =
     me-no-dev/AsyncTCP
     https://github.com/parip69/ESPAsyncMQTTBroker.git
 ```
@@ -28,6 +28,7 @@ lib_deps =
 ## Beispiel
 
 ```cpp
+#include <WiFi.h>
 #include <ESPAsyncMQTTBroker.h>
 
 ESPAsyncMQTTBroker mqtt;
@@ -36,8 +37,12 @@ void setup() {
   Serial.begin(115200);
   WiFi.begin("SSID", "PASSWORT");
 
-  mqtt.onMessage([](const String& topic, const String& payload) {
-    Serial.printf("Topic: %s, Payload: %s\n", topic.c_str(), payload.c_str());
+  mqtt.onMessage([](const String& clientId,
+                    const String& topic,
+                    const String& payload) {
+    Serial.printf("Client: %s, Topic: %s, Payload: %s\n",
+                  clientId.c_str(), topic.c_str(), payload.c_str());
+
     if (topic == "/ring") {
       digitalWrite(LED_BUILTIN, payload == "an" ? LOW : HIGH);
     }
@@ -50,6 +55,14 @@ void loop() {
   mqtt.loop();
 }
 ```
+
+Der Nachrichten-Callback erhält immer drei Werte:
+
+```cpp
+clientId, topic, payload
+```
+
+Die `clientId` bezeichnet den MQTT-Client, von dem die Nachricht beim Broker eingegangen ist. Die Payload selbst wird vom Broker unverändert weitergeleitet.
 
 ## Beispiele
 
