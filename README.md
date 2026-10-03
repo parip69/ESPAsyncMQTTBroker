@@ -20,6 +20,8 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 - Publish/Subscribe mit Topic-Filtern
 - Retained Messages
 - Verarbeitung der vorhandenen QoS-0/1/2-Publish-Abläufe
+- Subscription-QoS wird gespeichert; der effektive Zustell-QoS ist das Minimum aus Publish-QoS und Subscription-QoS
+- Dieselbe QoS-Begrenzung gilt auch für Retained Messages
 - Callback `onMessage(clientId, topic, payload)`
 - Payload wird unverändert weitergegeben; auch leere Payloads werden weitergeleitet
 - Optionales Ausschließen eines Clients beim Broker-Publish über `excludeClientId`
@@ -27,15 +29,15 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 ### Teilweise unterstützt
 
 - `noLocal`: Das Flag wird beim SUBSCRIBE eingelesen und in der Subscription gespeichert, bei der späteren Nachrichtenverteilung aber noch nicht ausgewertet.
-- Subscription-QoS: Der gewünschte QoS wird beim SUBSCRIBE erkannt und bestätigt, aber derzeit nicht in `Subscription` gespeichert. Bei der Weiterleitung wird deshalb aktuell der Publish-QoS verwendet.
+
 
 ### Noch nicht umgesetzt
 
 - Wirksame `noLocal`-Filterung bei der Nachrichtenverteilung
-- Effektiver Zustell-QoS als Minimum aus Publish-QoS und Subscription-QoS
+
 - `ignoreLoopDeliver`: Das Konfigurationsfeld ist vorhanden, wird aktuell aber nicht ausgewertet und verändert das Laufzeitverhalten nicht.
 
-> Stand: Version 2.0.220. Diese Version dokumentiert den vorhandenen Implementierungsstand und ändert das Laufzeitverhalten nicht.
+> Stand: Version 2.0.221. Subscription-QoS wird bei normaler und Retained-Zustellung berücksichtigt. `noLocal` und `ignoreLoopDeliver` bleiben unverändert.
 
 ## Installation
 

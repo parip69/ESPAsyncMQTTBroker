@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.0.221 - Oktober 2026
+- Subscription-QoS wird beim SUBSCRIBE in `Subscription` gespeichert und bei einem erneuten SUBSCRIBE aktualisiert
+- Effektiver Zustell-QoS ist jetzt der kleinere Wert aus Publish-QoS und Subscription-QoS
+- Dieselbe QoS-Begrenzung wird auch bei Retained Messages verwendet
+- Retained-Zustellungen mit QoS 1/2 enthalten jetzt die erforderliche Packet-ID und werden im vorhandenen Outgoing-QoS-State nachverfolgt
+- Keine Änderung an Payload, Topics, `excludeClientId`, `noLocal` oder `ignoreLoopDeliver`
+- Öffentliche Broker-Funktionen und bestehende Fingerprint-Aufrufe bleiben unverändert
+- Versionsstände auf 2.0.221 angehoben
+
 ## v2.0.220 - Oktober 2026
 - Reine Aufräum- und Dokumentationsversion ohne Änderung des Laufzeitverhaltens
 - `ignoreLoopDeliver` im Code und in der Dokumentation klar als aktuell nicht ausgewertet markiert

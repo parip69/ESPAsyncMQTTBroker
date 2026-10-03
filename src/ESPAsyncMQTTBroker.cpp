@@ -1,4 +1,4 @@
-// @ 2.0.220
+// @ 2.0.221
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -1602,9 +1602,11 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
             {
                 if (existing.filter == topic)
                 {
-                    existing.noLocal = noLocal; // QoS/Flags aktualisieren
+                    existing.qos = requestedQoS;
+                    existing.noLocal = noLocal;
                     found = true;
-                    logMessage(DEBUG_DEBUG, "Subscription for client '%s' to topic '%s' updated (noLocal %s).", client->clientId.c_str(), topic.c_str(), noLocal ? "Yes" : "No");
+                    logMessage(DEBUG_DEBUG, "Subscription for client '%s' to topic '%s' updated (QoS %d, noLocal %s).",
+                               client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Yes" : "No");
                     break;
                 }
             }
@@ -1612,6 +1614,7 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
             {
                 Subscription sub;
                 sub.filter = topic;
+                sub.qos = requestedQoS;
                 sub.noLocal = noLocal;
                 client->subscriptions.push_back(sub);
             }
@@ -2121,7 +2124,10 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                     actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
                 }
 
-                size_t remainingLengthField = 2 + topicLength + actualPayloadLength;
+                // MQTT: Zustellung maximal mit dem QoS der Subscription.
+                uint8_t final_qos = (msg->qos < sub.qos) ? msg->qos : sub.qos;
+                size_t packet_id_len = (final_qos > 0) ? 2 : 0;
+                size_t remainingLengthField = 2 + topicLength + packet_id_len + actualPayloadLength;
 
                 // BP2-02: Variable-Length-Encoding statt 1-Byte-Limit
                 size_t header_len = 1; // Fixed header byte
@@ -2146,7 +2152,7 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                 std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
 
                 uint8_t *ptr = packet.get();
-                *ptr++ = (MQTT_PUBLISH << 4) | (msg->qos << 1) | 0x01;
+                *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1) | 0x01;
 
                 // Variable-Length-Encoding
                 size_t rem_len = remainingLengthField;
@@ -2165,6 +2171,32 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
                 memcpy(ptr, msg->topic.c_str(), topicLength);
                 ptr += topicLength;
 
+                if (final_qos > 0)
+                {
+                    uint16_t packetId = getNextPacketId();
+                    *ptr++ = packetId >> 8;
+                    *ptr++ = packetId & 0xFF;
+
+                    auto outMsg = std::make_unique<OutgoingQoSMessage>();
+                    outMsg->qos = final_qos;
+                    outMsg->retain = true;
+                    outMsg->topic = msg->topic;
+                    outMsg->payloadLen = actualPayloadLength;
+
+                    if (actualPayloadLength > 0 && msg->payload)
+                    {
+                        outMsg->payload = std::unique_ptr<uint8_t[]>(new uint8_t[actualPayloadLength]);
+                        memcpy(outMsg->payload.get(), msg->payload.get(), actualPayloadLength);
+                    }
+
+                    outMsg->sentTime = millis();
+                    outMsg->retryCount = 0;
+                    outMsg->packetId = packetId;
+                    outMsg->state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
+
+                    client->outgoingMessages[packetId] = std::move(*outMsg);
+                }
+
                 if (actualPayloadLength > 0 && msg->payload)
 
                 {
@@ -2174,7 +2206,7 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
 
                 client->client->write((const char *)packet.get(), totalPacketLength);
 
-                logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic.c_str(), (unsigned)actualPayloadLength, msg->qos);
+                logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic.c_str(), (unsigned)actualPayloadLength, final_qos);
 
                 break;
             }
@@ -2492,7 +2524,8 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
 
             {
 
-                uint8_t final_qos = qos; // Aktuell wird nur der Publish-QoS verwendet; Subscription-QoS wird noch nicht gespeichert/berücksichtigt.
+                // MQTT: Effektiver Zustell-QoS ist der kleinere Wert aus Publish- und Subscription-QoS.
+                uint8_t final_qos = (qos < sub.qos) ? qos : sub.qos;
 
                 size_t packet_id_len = (final_qos > 0) ? 2 : 0;
 
