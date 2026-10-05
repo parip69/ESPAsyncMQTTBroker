@@ -18,6 +18,14 @@ Stand: **2.0.222**. MQTT **3.1.1** ist der aktive unterstützte Protokollstand.
 MQTT **5 wird nicht unterstützt**. Die Bibliothek beansprucht weiterhin keine
 vollständige MQTT-3.1.1-Konformität.
 
+**Stabiler geprüfter Stand: Tag `v2.0.222`.** 50 lokale C++-Tests sowie
+55 Tests auf dem echten Broker sind bestanden. Die dokumentierten
+Fingerprint-/MQTT-/Ausgangspfade mit Parip99 `.99`, gumi77 `.77` und
+Shelly `.127` wurden geprüft. Eine genaue physische 500-ms-Pulsdauer wurde
+nicht separat bestätigt. Details stehen in `agent_worklog.md`.
+Weitere MQTT-3.1.1-Restpunkte werden ausschließlich in einer folgenden
+Version bearbeitet; 2.0.222 bleibt eingefroren.
+
 ### Stabilitäts- und Validierungskorrekturen in 2.0.222
 
 - Sicherer Abbruch nach `close()`, auch bei synchronem Disconnect-Callback;

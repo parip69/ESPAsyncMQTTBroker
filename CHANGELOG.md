@@ -10,7 +10,9 @@
 - Kein `noLocal` aus reservierten MQTT-3.1.1-Bits; internes Feld bleibt `false`
 - Subscription-QoS, bestehende Retained-/QoS-Verteilung, `excludeClientId`, `ignoreLoopDeliver`, JSON und Topics funktional erhalten
 - MQTT 5 bleibt nicht unterstützt; bekannte weitere MQTT-3.1.1-Abweichungen bewusst offen
-- Hardwarebestätigung von 2.0.222 erfolgt nach Übernahme durch den Projektinhaber; keine Hardware-PASS-Aussage aus lokalen Tests ableiten
+- Hardwareprüfung abgeschlossen: 55 echte Broker-Tests PASS, 0 FAIL; geprüfte Finger-/MQTT-/Ausgangspfade mit Parip99 .99, gumi77 .77 und Shelly .127 bestätigt
+- Normalzustand wiederhergestellt: Subscription-QoS 0, DEBUG_NONE, unverändertes Shelly-Skript, Test-Retained gelöscht; genaue physische 500-ms-Pulsdauer nicht separat bestätigt
+- Stabiler Stand unter Tag v2.0.222 eingefroren; weitere MQTT-3.1.1-Restpunkte ausschließlich in einer folgenden Version bearbeiten
 
 ## v2.0.221 - Oktober 2026
 - Subscription-QoS wird beim SUBSCRIBE in `Subscription` gespeichert und bei einem erneuten SUBSCRIBE aktualisiert

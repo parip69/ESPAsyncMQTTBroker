@@ -53,7 +53,7 @@ Protokolle außerhalb des Repositorys: `compile.log`, `runtime.log`,
 `esp32-final-build.log`. Testdateien, Test-EXE und Firmware-Buildartefakte werden
 weder committed noch in das Änderungs-ZIP aufgenommen.
 
-## Hardwarestatus und Rückwärtskompatibilität
+## Hardwarestatus beim ersten lokalen Abschluss (historischer Zwischenstand)
 
 **Für 2.0.222 keine Hardwaretests ausgeführt.** Die hardwaregetestete Basis
 2.0.221 bleibt die Vergleichsgrundlage. Simulierte MQTT-Level-4-Client-IDs im
@@ -86,7 +86,7 @@ Große SUBACK-Remaining-Length, allgemeine Binärpayload-Weiterleitung, globale
 UTF-8-/Paketlängenprüfung und Task-Synchronisierung bleiben weitere offene
 MQTT-3.1.1-Punkte. MQTT 5 und noLocal werden nicht implementiert.
 
-## Bereitstellung
+## Bereitstellung beim ersten lokalen Abschluss (historischer Zwischenstand)
 
 Der Benutzer hat nach Abschluss der lokalen Laufzeittests ausdrücklich Commit
 und GitHub-Push von Version 2.0.222 autorisiert; diese neuere Freigabe ersetzt
@@ -97,3 +97,47 @@ Zusätzliches Änderungs-ZIP:
 `D:\!FingerPrint\ESPAsyncMQTTBroker_2.0.222_geaenderte_Dateien.zip`.
 Es enthält ausschließlich die sieben geänderten vollständigen Dateien mit
 erhaltener Ordnerstruktur; keine Tests, Patcher oder temporären Dateien.
+
+## Abschluss der Hardwareprüfung und Einfrieren von 2.0.222 – 05.10.2026
+
+Dieser Abschluss ersetzt den oben dokumentierten offenen Hardwarestatus des
+ersten lokalen Abschlusses. Die Bibliotheksquellen wurden nach den Tests
+nicht mehr funktional verändert.
+
+- 50 lokale C++-Tests: PASS, 0 FAIL.
+- 55 Tests auf dem echten Broker Parip99 .99: PASS, 0 FAIL; Fixed Header,
+  Verbindungszustand, CONNECT, SUBSCRIBE, Close/Folgepakete und MQTT-Zustellung.
+- MAX-Build und gezielte serielle Uploads auf .99 und .77: PASS, Flash-Hashes bestätigt.
+- Echter gumi77: Live-QoS 1 und PUBACK, Retained QoS 1 mit PUBACK nach
+  Reconnect, Retained QoS 0 nach Reconnect und Retained-Löschung: PASS.
+- Parip99/gumi77-Fingererkennung und produktiver MQTT-Fingerpfad in Logs
+  nachgewiesen; Output 1/2 auf beiden ESP32 und Output 27 auf Shelly geprüft.
+- Originalpublisher-Ausschluss, genau eine Zustellung und keine Rückschleife
+  im gezielt geprüften gumi77-Publish-Pfad: PASS.
+- PINGREQ/PINGRESP und abschließender MQTT-online-Status aller drei Geräte: PASS.
+- Normaler MAX-Stand auf beiden ESP32 wiederhergestellt: Subscription-QoS 0,
+  DEBUG_NONE; Shelly-Produktivskript unverändert, Test-Retained gelöscht,
+  Ausgänge AUS und COM3/COM4 frei.
+- Physische Pulsdauer von genau 500 ms nicht separat bestätigt. HTTP-
+  Zeitmessungen waren dafür nicht ausreichend belastbar; duration=500 im
+  JSON und unveränderte Pulslogik sind nachgewiesen. Dies blockiert das
+  Einfrieren gemäß ausdrücklicher Benutzerentscheidung nicht.
+
+Ausführlicher Hardwarebericht:
+`D:\!FingerPrint\###1A-Parip69-Fingerprint_Original\agent_worklog.md`,
+Einträge vom 05.10.2026, 08:36 bis 08:49 Uhr. Einzelprotokolle liegen unter
+`C:\Temp\ESPAsyncMQTTBroker-222-tests`. Der vorhandene Fingerprint-Upload-Hook
+veröffentlichte die normale MAX-Firmware automatisch im Firmware-Release;
+temporäre Test-Builds verhinderten weitere Veröffentlichungen.
+
+**Freigabeentscheidung:** 2.0.222 ist für die dokumentierten Prüfungen der
+stabile Stand. Kein weiterer Broker-Quellcodefix erforderlich. Ein
+abschließender Dokumentations-Commit und der annotierte Tag `v2.0.222`
+halten diesen Stand fest. Versionsnummer und Quellcode bleiben unverändert.
+
+**Folgende Version:** Ausschließlich die bereits dokumentierten
+MQTT-3.1.1-Restpunkte separat bearbeiten. Keine MQTT-5-/noLocal-Funktionen,
+keine Fingerprint-Anwendungslogik und keine weiteren Änderungen unter
+Version 2.0.222. Die Entwicklung dieser Folgeversion wird hier noch nicht
+begonnen. Umfang und Reihenfolge der Restpunkte sind vor ihrer Umsetzung
+festzulegen.
