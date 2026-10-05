@@ -22,9 +22,9 @@ Der bisherige Stand bleibt unter Tag **v2.0.222** erhalten.
 - [x] Normalbetrieb mit QoS 0 und `DEBUG_NONE` herstellen; COM-Ports freigeben.
 - [x] Tests, Benchmarks und ausführliche Prüfberichte lokal sichern und vom Upload ausschließen.
 - [x] Dauerhafte Upload-Auswahl in `.gitignore`: nur Bibliotheksquellen, Metadaten, Lizenz und knappe Dokumentation; Test-, Hardware- und Beispieldateien ausschließen.
-- [ ] Abgeschlossene Testordner lokal aufräumen; Rückkehrdateien und kurze Zusammenfassung sind gesichert. Rekursives Löschen wurde durch die automatische Sicherheitsprüfung blockiert.
+- [ ] Abgeschlossene Testordner lokal aufräumen; Rückkehrdateien und kurze Zusammenfassung sind gesichert.
 - [ ] Ausgewählte Bibliotheksbeispiele in einer späteren Aufgabe ergänzen.
-- [ ] GitHub-Veröffentlichung.
+- [x] Bibliotheksstand 2.0.223 auf GitHub veröffentlichen; nur die elf freigegebenen Bibliotheksdateien.
 
 ## Paket 2: größere MQTT-3.1.1-Arbeiten
 
