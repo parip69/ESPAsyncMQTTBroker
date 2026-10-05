@@ -1,5 +1,5 @@
 // ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️️
-// @ 2.0.221
+// @ 2.0.222
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -77,7 +77,7 @@ struct Subscription
 {
     String filter;         ///< Topic-Filter, mit dem eingehende Nachrichten verglichen werden
     uint8_t qos = 0;       ///< Maximaler QoS dieser Subscription (0..2)
-    bool noLocal = false;  ///< Wird beim SUBSCRIBE gespeichert; bei der Zustellung aktuell noch nicht ausgewertet
+    bool noLocal = false;  ///< Reserviert; MQTT 3.1.1 setzt dieses Feld immer auf false
     // evtl. später noch weitere Flags (retainAsPublished, retainHandling…)
 };
 
@@ -91,6 +91,8 @@ struct MQTTClient
     AsyncClient *client = nullptr;
     String clientId;
     bool connected = false;
+    bool closing = false;     ///< Nach Close keine weitere Paketverarbeitung
+    bool connectSeen = false; ///< CONNECT darf pro TCP-Verbindung nur einmal auftreten
     uint32_t lastActivity = 0;
     uint16_t keepAlive = 0;
     bool cleanSession = true;
@@ -291,6 +293,7 @@ private:
     void handlePubRel(MQTTClient *client, uint8_t *data, size_t len);
     void handlePubComp(MQTTClient *client, uint8_t *data, size_t len);
     void processPacket(MQTTClient *client, uint8_t *data, size_t len);
+    bool isClientActive(AsyncClient *transport, const MQTTClient *identity) const;
     bool topicMatches(const Subscription &subscription, const String &topic);
     bool topicMatches(const String &subscription, const String &topic);
     void sendRetainedMessages(MQTTClient *client);

@@ -14,6 +14,25 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 
 ## Aktueller Implementierungsstand
 
+Stand: **2.0.222**. MQTT **3.1.1** ist der aktive unterstützte Protokollstand.
+MQTT **5 wird nicht unterstützt**. Die Bibliothek beansprucht weiterhin keine
+vollständige MQTT-3.1.1-Konformität.
+
+### Stabilitäts- und Validierungskorrekturen in 2.0.222
+
+- Sicherer Abbruch nach `close()`, auch bei synchronem Disconnect-Callback;
+  aktive Clientzuordnung wird nach Paketverarbeitung und relevanten Anwendungs-Callbacks erneut geprüft.
+- Zentrale Fixed-Header- und Verbindungszustandsprüfung: genau ein CONNECT je
+  TCP-Verbindung, keine normalen Requests vor dessen erfolgreicher Annahme.
+- CONNECT prüft `MQTT`, Protocol Level 4, Flagkombinationen, Feldgrenzen und
+  UTF-8-Textfelder vor Authentifizierung und Übernahme von Session/Will.
+- SUBSCRIBE wird vollständig vor Änderungen validiert. Nur Optionsbytes
+  `0x00`, `0x01`, `0x02` sind zulässig; reservierte Bits führen zur Trennung.
+- `Subscription::noLocal` bleibt als internes reserviertes Feld bestehen und
+  wird auf `false` gesetzt. `noLocal` ist keine MQTT-3.1.1-Funktion.
+
+Normative Grundlage: [OASIS MQTT 3.1.1 einschließlich Approved Errata 01](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/errata01/os/mqtt-v3.1.1-errata01-os-complete.html).
+
 ### Unterstützt
 
 - MQTT-Broker direkt auf dem ESP32 mit `AsyncTCP`
@@ -23,21 +42,23 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 - Subscription-QoS wird gespeichert; der effektive Zustell-QoS ist das Minimum aus Publish-QoS und Subscription-QoS
 - Dieselbe QoS-Begrenzung gilt auch für Retained Messages
 - Callback `onMessage(clientId, topic, payload)`
-- Payload wird unverändert weitergegeben; auch leere Payloads werden weitergeleitet
+- Bestehende JSON-/Text-Payload-Verarbeitung und Weiterleitung leerer Payloads
 - Optionales Ausschließen eines Clients beim Broker-Publish über `excludeClientId`
 
-### Teilweise unterstützt
+### Bewusst offene Einschränkungen
 
-- `noLocal`: Das Flag wird beim SUBSCRIBE eingelesen und in der Subscription gespeichert, bei der späteren Nachrichtenverteilung aber noch nicht ausgewertet.
+- Topic-Matcher-Randfälle und `$`-Wildcard-Sonderregel
+- Auswahl des höchsten QoS bei überlappenden Subscriptions
+- RETAIN-Flag bei Live-Zustellung und Retained-Auswahl über mehrere alte Filter
+- Mehrbyte-Remaining-Length bei großen SUBACK-Antworten
+- Vollständige Binärpayload-Weiterleitung sowie globale UTF-8-Prüfung aller Paketarten
+- Vollständige persistente Sessions, Offline-QoS-Queue und QoS-2-Wiederaufnahme
+- Weitere Paketlängen-/Identifierprüfungen außerhalb CONNECT/SUBSCRIBE,
+  Ressourcenlimits und allgemeine Task-Synchronisierung
+- Bestehender Ausschluss des ursprünglichen Publishers bleibt erhalten.
 
-
-### Noch nicht umgesetzt
-
-- Wirksame `noLocal`-Filterung bei der Nachrichtenverteilung
-
-- `ignoreLoopDeliver`: Das Konfigurationsfeld ist vorhanden, wird aktuell aber nicht ausgewertet und verändert das Laufzeitverhalten nicht.
-
-> Stand: Version 2.0.221. Subscription-QoS wird bei normaler und Retained-Zustellung berücksichtigt. `noLocal` und `ignoreLoopDeliver` bleiben unverändert.
+`ignoreLoopDeliver` bleibt ohne Laufzeitwirkung. `excludeClientId`, Topics,
+JSON-Verarbeitung und Zustell-QoS wurden funktional nicht verändert.
 
 ## Installation
 
@@ -89,7 +110,9 @@ Der Nachrichten-Callback erhält immer drei Werte:
 clientId, topic, payload
 ```
 
-Die `clientId` bezeichnet den MQTT-Client, von dem die Nachricht beim Broker eingegangen ist. Die Payload selbst wird vom Broker unverändert weitergeleitet.
+Die `clientId` bezeichnet den MQTT-Client, von dem die Nachricht beim Broker eingegangen ist.
+Die bestehende JSON-/Text-Verarbeitung bleibt erhalten. Allgemeine Binärpayloads
+mit eingebetteten Nullbytes werden noch nicht durchgängig unverändert weitergeleitet.
 
 ## Beispiele
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.0.222 - Oktober 2026
+- Empfang nach synchronem oder verzögertem Close sicher abbrechen; Clientzuordnung nach Handlern und relevanten Anwendungs-Callbacks erneut prüfen
+- Internes `closing`-/`connectSeen`-Tracking ohne Änderung der öffentlichen Broker-API
+- Zentrale Fixed-Header-Prüfung; ungültige Header und unzulässige Client-Eingangsarten schließen die Verbindung (MQTT-2.2.2-1/-2, MQTT-3.3.1-2/-4)
+- Genau ein CONNECT pro Verbindung; keine normalen Requests vor erfolgreicher Annahme (MQTT-3.1.0-1/-2, MQTT-3.1.4-5)
+- CONNECT prüft Protokollname, Level 4, Flags, vollständige Felder und UTF-8; Session/Will erst nach erfolgreicher Validierung und Authentifizierung übernehmen (MQTT-3.1.2-1/-2/-3/-11/-14/-15/-22, MQTT-3.1.4-1)
+- SUBSCRIBE mit zwei Durchläufen validieren; ID 0, leere/abgeschnittene Payload, ungültiges UTF-8, Filter und Optionsbytes vor jeder Subscription-Änderung abweisen (MQTT-2.3.1-1, MQTT-3.8.3-1/-3, MQTT-3-8.3-4)
+- Kein `noLocal` aus reservierten MQTT-3.1.1-Bits; internes Feld bleibt `false`
+- Subscription-QoS, bestehende Retained-/QoS-Verteilung, `excludeClientId`, `ignoreLoopDeliver`, JSON und Topics funktional erhalten
+- MQTT 5 bleibt nicht unterstützt; bekannte weitere MQTT-3.1.1-Abweichungen bewusst offen
+- Hardwarebestätigung von 2.0.222 erfolgt nach Übernahme durch den Projektinhaber; keine Hardware-PASS-Aussage aus lokalen Tests ableiten
+
 ## v2.0.221 - Oktober 2026
 - Subscription-QoS wird beim SUBSCRIBE in `Subscription` gespeichert und bei einem erneuten SUBSCRIBE aktualisiert
 - Effektiver Zustell-QoS ist jetzt der kleinere Wert aus Publish-QoS und Subscription-QoS

@@ -1,8 +1,61 @@
-// @ 2.0.221
+// @ 2.0.222
 
 #include "ESPAsyncMQTTBroker.h"
 
 #include <cstdarg>
+
+// AsyncTCP kann onDisconnect synchron aufrufen und den MQTTClient freigeben.
+// Nach close() darf deshalb kein Zugriff mehr auf diesen Zustand erfolgen.
+static void closeMQTTClient(MQTTClient *client)
+{
+    AsyncClient *transport = client->client;
+    client->closing = true;
+    client->connected = false;
+    transport->close();
+}
+
+// MQTT-1.5.3-1/-2: Wohlgeformtes UTF-8 ohne U+0000, Surrogate oder Overlongs.
+// U+FEFF bleibt unverändert (MQTT-1.5.3-3); Binärfelder werden nicht geprüft.
+static bool validMQTTUTF8(const uint8_t *data, size_t len)
+{
+    for (size_t i = 0; i < len;)
+    {
+        uint32_t codepoint = data[i++];
+        if (codepoint == 0) return false;
+        if (codepoint < 0x80) continue;
+        size_t trailing;
+        uint32_t minimum;
+        if (codepoint >= 0xC2 && codepoint <= 0xDF)
+        { trailing = 1; minimum = 0x80; codepoint &= 0x1F; }
+        else if (codepoint >= 0xE0 && codepoint <= 0xEF)
+        { trailing = 2; minimum = 0x800; codepoint &= 0x0F; }
+        else if (codepoint >= 0xF0 && codepoint <= 0xF4)
+        { trailing = 3; minimum = 0x10000; codepoint &= 0x07; }
+        else return false;
+        if (trailing > len - i) return false;
+        while (trailing--)
+        {
+            const uint8_t byte = data[i++];
+            if ((byte & 0xC0) != 0x80) return false;
+            codepoint = (codepoint << 6) | (byte & 0x3F);
+        }
+        if (codepoint < minimum || codepoint > 0x10FFFF ||
+            (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return false;
+    }
+    return true;
+}
+
+static bool readMQTTField(const uint8_t *data, size_t len, size_t &offset,
+                          const uint8_t *&field, size_t &fieldLen)
+{
+    if (offset > len || len - offset < 2) return false;
+    fieldLen = (data[offset] << 8) | data[offset + 1];
+    offset += 2;
+    if (fieldLen > len - offset) return false;
+    field = data + offset;
+    offset += fieldLen;
+    return true;
+}
 
 // Hilfsfunktion für CONNACK + Close
 
@@ -14,7 +67,14 @@ static inline void sendConnackAndClose(MQTTClient *client, uint8_t returnCode)
 
     client->client->write((const char *)connack, sizeof(connack));
 
-    client->client->close();
+    closeMQTTClient(client);
+}
+
+bool ESPAsyncMQTTBroker::isClientActive(AsyncClient *transport, const MQTTClient *identity) const
+{
+    const auto it = clients.find(transport);
+    return it != clients.end() && it->second.get() == identity &&
+           !it->second->closing && transport->connected();
 }
 
 uint16_t ESPAsyncMQTTBroker::getNextPacketId()
@@ -216,14 +276,20 @@ void ESPAsyncMQTTBroker::checkTimeouts()
     {
         auto &mqttClient = it->second;
 
+        if (mqttClient->closing)
+        {
+            ++it;
+            continue;
+        }
+
         // Check for client keep-alive timeout
         if (mqttClient->connected && mqttClient->keepAlive > 0 &&
             (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL))
         {
             logMessage(DEBUG_INFO, "Client ⏰ inactive, disconnecting: %s", mqttClient->clientId.c_str());
-            AsyncClient *clientToClose = mqttClient->client;
+            MQTTClient *clientToClose = mqttClient.get();
             it++;
-            clientToClose->close();
+            closeMQTTClient(clientToClose);
         }
         else
         {
@@ -401,6 +467,8 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
             MQTTClient* mqttClient = it->second.get();
 
+            if (mqttClient->closing || !client->connected()) return;
+
 
 
             const size_t maxBufferedBytes = MQTT_MAX_PACKET_SIZE * 4U;
@@ -409,7 +477,7 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
                                    (unsigned)(mqttClient->rxBuffer.size() + len),
                                    (unsigned)maxBufferedBytes);
                 mqttClient->rxBuffer.clear();
-                client->close();
+                closeMQTTClient(mqttClient);
                 return;
             }
 
@@ -438,7 +506,7 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
                     if (remainingLengthBytes > 4) {
                         broker->logMessage(DEBUG_ERROR, "Invalid MQTT Remaining Length");
                         mqttClient->rxBuffer.clear();
-                        client->close();
+                        closeMQTTClient(mqttClient);
                         return;
                     }
 
@@ -455,7 +523,7 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
                                        (unsigned)packetSize,
                                        (unsigned)MQTT_MAX_PACKET_SIZE);
                     mqttClient->rxBuffer.clear();
-                    client->close();
+                    closeMQTTClient(mqttClient);
                     return;
                 }
 
@@ -464,6 +532,11 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
                 }
 
                 broker->processPacket(mqttClient, mqttClient->rxBuffer.data() + consumed, packetSize);
+                // Kein Dereferenzieren der alten Identität: close() kann sie zerstört haben.
+                auto active = broker->clients.find(client);
+                if (active == broker->clients.end() || active->second.get() != mqttClient ||
+                    active->second->closing || !client->connected()) return;
+                mqttClient = active->second.get();
                 consumed += packetSize;
             }
 
@@ -499,6 +572,9 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
 
 
             auto& target = it->second;
+
+            target->closing = true;
+            target->connected = false;
 
 
 
@@ -654,6 +730,56 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
 
     uint8_t packetType = (header >> 4) & 0x0F;
 
+    if (client->closing) return;
+    // MQTT-2.2.2-1/-2; MQTT-3.3.1-2/-4: Flags vor jedem Handler prüfen.
+    const uint8_t flags = header & 0x0F;
+    bool validHeader = false;
+    switch (packetType)
+    {
+    case MQTT_PUBLISH:
+    {
+        const uint8_t qos = (flags >> 1) & 0x03;
+        validHeader = qos != 3 && (qos != 0 || (flags & 0x08) == 0);
+        break;
+    }
+    case MQTT_PUBREL:
+    case MQTT_SUBSCRIBE:
+    case MQTT_UNSUBSCRIBE:
+        validHeader = flags == 0x02;
+        break;
+    case MQTT_CONNECT:
+    case MQTT_PUBACK:
+    case MQTT_PUBREC:
+    case MQTT_PUBCOMP:
+    case MQTT_PINGREQ:
+    case MQTT_DISCONNECT:
+        validHeader = flags == 0;
+        break;
+    default:
+        // Reservierte Typen und reine Server-Ausgaben sind kein Client-Request.
+        break;
+    }
+    if (!validHeader)
+    {
+        closeMQTTClient(client);
+        return;
+    }
+    // MQTT-3.1.0-1/-2 und MQTT-3.1.4-5: genau ein CONNECT, danach Annahme nötig.
+    if (packetType == MQTT_CONNECT)
+    {
+        if (client->connectSeen)
+        {
+            closeMQTTClient(client);
+            return;
+        }
+        client->connectSeen = true;
+    }
+    else if (!client->connected)
+    {
+        closeMQTTClient(client);
+        return;
+    }
+
     size_t multiplier = 1;
 
     size_t value = 0;
@@ -775,469 +901,87 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
 
 void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t length)
 {
-    logMessage(DEBUG_DEBUG, "🔍 MQTT CONNECT Paket empfangen (len=%u)", length);
+    // MQTT-3.1.4-1: Erst vollständig prüfen; keine Session/Will vor Annahme ändern.
+    if (length < 7 || data[0] != 0 || data[1] != 4 || memcmp(data + 2, "MQTT", 4) != 0)
+    {
+        closeMQTTClient(client); // MQTT-3.1.2-1: falscher Protokollname
+        return;
+    }
+    const uint8_t protocolLevel = data[6];
+    if (protocolLevel != MQTT_PROTOCOL_LEVEL)
+    {
+        sendConnackAndClose(client, 0x01); // MQTT-3.1.2-2: keine fremden Layouts parsen
+        return;
+    }
     if (length < 10)
-
     {
-
-        logMessage(DEBUG_ERROR, "❌ Paket zu kurz!");
-
+        closeMQTTClient(client);
         return;
     }
-
-    // Protokollname
-
-    uint16_t protocolNameLength = (data[0] << 8) | data[1];
-
-    if (protocolNameLength + 2 > length)
-
+    const uint8_t flags = data[7];
+    const bool cleanSession = (flags & 0x02) != 0;
+    const bool willFlag = (flags & 0x04) != 0;
+    const uint8_t willQos = (flags >> 3) & 0x03;
+    const bool willRetain = (flags & 0x20) != 0;
+    const bool passwordFlag = (flags & 0x40) != 0;
+    const bool usernameFlag = (flags & 0x80) != 0;
+    // MQTT-3.1.2-3/-11/-14/-15/-22: reservierte und widersprüchliche Flags.
+    if ((flags & 0x01) || (!willFlag && (willQos != 0 || willRetain)) ||
+        (willFlag && willQos == 3) || (passwordFlag && !usernameFlag))
     {
-
-        logMessage(DEBUG_ERROR, "❌ Zu kurz für Protokollnamen!");
-
+        closeMQTTClient(client);
         return;
     }
-
-    char protocolName[MQTT_MAX_TOPIC_SIZE] = {0};
-
-    if (protocolNameLength >= sizeof(protocolName))
-
+    const uint16_t keepAlive = (data[8] << 8) | data[9];
+    size_t offset = 10;
+    const uint8_t *idData = nullptr, *willTopicData = nullptr, *willData = nullptr;
+    const uint8_t *userData = nullptr, *passwordData = nullptr;
+    size_t idLen = 0, willTopicLen = 0, willLen = 0, userLen = 0, passwordLen = 0;
+    // MQTT-3.1.3-1: vorgeschriebene Reihenfolge, alle Felder innerhalb des Pakets.
+    if (!readMQTTField(data, length, offset, idData, idLen) ||
+        !validMQTTUTF8(idData, idLen) ||
+        (willFlag && (!readMQTTField(data, length, offset, willTopicData, willTopicLen) ||
+                      !validMQTTUTF8(willTopicData, willTopicLen) ||
+                      !readMQTTField(data, length, offset, willData, willLen))) ||
+        (usernameFlag && (!readMQTTField(data, length, offset, userData, userLen) ||
+                          !validMQTTUTF8(userData, userLen))) ||
+        (passwordFlag && !readMQTTField(data, length, offset, passwordData, passwordLen)) ||
+        offset != length)
     {
-
-        logMessage(DEBUG_ERROR, "❌ Protocol name too long!");
-
+        closeMQTTClient(client);
         return;
     }
-
-    memcpy(protocolName, data + 2, protocolNameLength);
-
-    size_t offset = 2 + protocolNameLength;
-
-    if (offset >= length)
-
+    // Bestehende lokale Grenzen; keine Felder still abschneiden.
+    if ((idLen == 0 && !cleanSession) || idLen >= 256)
     {
-
-        logMessage(DEBUG_ERROR, "❌ Zu kurz für Protokoll-Level!");
-
+        sendConnackAndClose(client, 0x02); // MQTT-3.1.3-8/-9
         return;
     }
-
-    uint8_t protocolLevel = data[offset++];
-
-    client->protocolVersion = protocolLevel;
-
-    // Flags (CONNECT)
-
-    if (offset >= length)
-
+    if (userLen >= 256 || passwordLen >= 256)
     {
-
-        logMessage(DEBUG_ERROR, "❌ Zu kurz für CONNECT-Flags!");
-
+        sendConnackAndClose(client, 0x04);
         return;
     }
-
-    uint8_t connectFlags = data[offset++];
-
-    bool cleanSession = (connectFlags & 0x02) != 0;
-
-    bool willFlag = (connectFlags & 0x04) != 0;
-
-    bool passwordFlag = (connectFlags & 0x40) != 0;
-
-    bool usernameFlag = (connectFlags & 0x80) != 0;
-
-    // KeepAlive
-
-    if (offset + 2 > length)
-
+    if (willFlag && (willTopicLen == 0 || willTopicLen > MQTT_MAX_TOPIC_SIZE ||
+                     willLen > MQTT_MAX_PAYLOAD_SIZE))
     {
-
-        logMessage(DEBUG_ERROR, "❌ Zu kurz für Keep-Alive!");
-
+        closeMQTTClient(client);
         return;
     }
-
-    uint16_t keepAlive = (data[offset] << 8) | data[offset + 1];
-
-    offset += 2;
-
-    // ClientID
-
-    if (offset + 2 > length)
-
+    String clientId, username, password, willTopic;
+    if (idLen) clientId.concat((const char *)idData, idLen);
+    if (userLen) username.concat((const char *)userData, userLen);
+    if (passwordLen) password.concat((const char *)passwordData, passwordLen);
+    if (willTopicLen) willTopic.concat((const char *)willTopicData, willTopicLen);
+    AsyncClient *transport = client->client;
+    if (willFlag && !isValidPublishTopic(willTopic))
     {
-
-        logMessage(DEBUG_ERROR, "❌ Zu kurz für Client-ID!");
-
+        if (isClientActive(transport, client)) closeMQTTClient(client);
         return;
     }
-
-    uint16_t clientIdLength = (data[offset] << 8) | data[offset + 1];
-
-    offset += 2;
-
-    if (clientIdLength == 0 && !cleanSession)
-
-    {
-
-        logMessage(DEBUG_ERROR, "REJECT: Empty ClientID not allowed if cleanSession=false");
-
-        sendConnackAndClose(client, 0x02); // Identifier Rejected
-
-        return;
-    }
-
-    if (offset + clientIdLength > length)
-
-    {
-
-        logMessage(DEBUG_ERROR, "❌ Zu kurz für komplette Client-ID!");
-
-        return;
-    }
-
-    char clientIdBuffer[256] = {0};
-
-    if (clientIdLength >= sizeof(clientIdBuffer))
-
-    {
-
-        logMessage(DEBUG_ERROR, "❌ Client-ID too long!");
-
-        return;
-    }
-
-    memcpy(clientIdBuffer, data + offset, clientIdLength);
-
-    String clientId = String(clientIdBuffer);
-
-    client->clientId = clientId;
-
-    offset += clientIdLength;
-
-    // Session-Wiederherstellung
-
-    bool sessionActuallyRestored = false;
-
-    auto sessionIt = persistentSessions.find(clientId);
-
-    if (!cleanSession && sessionIt != persistentSessions.end())
-
-    {
-
-        logMessage(DEBUG_INFO, "♻️ Persistente Session wiederhergestellt für Client: %s", clientId.c_str());
-
-        client->subscriptions = sessionIt->second->subscriptions;
-
-        persistentSessions.erase(sessionIt);
-
-        sessionActuallyRestored = true;
-    }
-
-    client->cleanSession = cleanSession;
-
-    client->keepAlive = keepAlive;
-    logMessage(DEBUG_INFO, "[BROKER] CONNECT cid=%s kaSec=%d", clientId.c_str(), keepAlive);
-
-    // Will-Handling (falls gesetzt)
-
-    if (willFlag)
-
-    {
-
-        client->hasWill = true;
-
-        client->willQos = (connectFlags & 0x18) >> 3;
-
-        client->willRetain = (connectFlags & 0x20) != 0;
-
-        if (offset + 2 > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Topic-Länge!");
-
-            client->client->close();
-
-            return;
-        }
-
-        uint16_t willTopicLen = (data[offset] << 8) | data[offset + 1];
-
-        offset += 2;
-
-        if (offset + willTopicLen > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Topic!");
-
-            client->client->close();
-
-            return;
-        }
-
-        if (willTopicLen > MQTT_MAX_TOPIC_SIZE)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Will-Topic too long!");
-
-            client->client->close();
-
-            return;
-        }
-
-        char willTopicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
-
-        memcpy(willTopicBuffer, data + offset, willTopicLen);
-
-        client->willTopic = String(willTopicBuffer);
-
-        if (!isValidPublishTopic(client->willTopic))
-
-        {
-
-            logMessage(DEBUG_ERROR, "Invalid Will-Topic (wildcards) -> close");
-
-            client->client->close();
-
-            return;
-        }
-
-        offset += willTopicLen;
-
-        if (offset + 2 > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Payload-Länge!");
-
-            client->client->close();
-
-            return;
-        }
-
-        uint16_t willPayloadActualLen = (data[offset] << 8) | data[offset + 1];
-
-        offset += 2;
-
-        if (offset + willPayloadActualLen > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Will-Payload!");
-
-            client->client->close();
-
-            return;
-        }
-
-        client->willPayloadLen = willPayloadActualLen;
-
-        size_t lenToCopy = willPayloadActualLen;
-
-        if (lenToCopy > MQTT_MAX_PAYLOAD_SIZE)
-
-        {
-
-            logMessage(DEBUG_WARNING, "Will-Payload wird gekürzt auf %u (von %u)", MQTT_MAX_PAYLOAD_SIZE, willPayloadActualLen);
-
-            lenToCopy = MQTT_MAX_PAYLOAD_SIZE;
-
-            client->willPayloadLen = MQTT_MAX_PAYLOAD_SIZE;
-        }
-
-        if (lenToCopy > 0)
-
-        {
-
-            client->willPayload = std::unique_ptr<uint8_t[]>(new uint8_t[lenToCopy]);
-
-            memcpy(client->willPayload.get(), data + offset, lenToCopy);
-        }
-
-        else
-
-        {
-
-            client->willPayload = nullptr;
-        }
-
-        offset += willPayloadActualLen;
-    }
-
-    else
-
-    {
-
-        client->hasWill = false;
-    }
-
-    // --- Username/Password Flags & KONFIG-MODUS (für glasklare Diagnose) ---
-
+    if (!isClientActive(transport, client)) return;
     const bool cfgUserSet = !brokerConfig.username.isEmpty();
-
     const bool cfgPassSet = !brokerConfig.password.isEmpty();
-
-    String username;
-
-    String password;
-
-    logMessage(DEBUG_DEBUG,
-
-               "CONNECT: proto='%s'(lvl=%u), flags=0x%02X [clean=%d, will=%d, usr=%d, pwd=%d], keepAlive=%u, clientId='%s'",
-
-               protocolName, (unsigned)protocolLevel, (unsigned)connectFlags,
-
-               (int)cleanSession, (int)willFlag, (int)usernameFlag, (int)passwordFlag,
-
-               (unsigned)keepAlive, clientId.c_str());
-
-    // --- Einheitliches AUTH-Log (keine Klartext-Passwörter) ---
-
-    if (!cfgUserSet)
-
-    {
-
-        // ANON: keine Flags erforderlich
-    }
-
-    else if (cfgUserSet && !cfgPassSet)
-
-    {
-
-        // USER_ONLY: Username-Flag MUSS gesetzt sein
-
-        if (!usernameFlag)
-
-        {
-
-            logMessage(DEBUG_ERROR, "REJECT: Mode=USER_ONLY -> username flag missing");
-
-            sendConnackAndClose(client, 0x04); // Bad user name or password
-
-            return;
-        }
-
-        // Passwort-Flag darf fehlen/gesetzt sein (Inhalt wird ignoriert)
-    }
-
-    else
-
-    {
-
-        // USER_PASS: beide Flags MÜSSEN gesetzt sein
-
-        if (!usernameFlag || !passwordFlag)
-
-        {
-
-            logMessage(DEBUG_ERROR, "REJECT: Mode=USER_PASS -> required flag(s) missing (usr=%d, pwd=%d)",
-
-                       (int)usernameFlag, (int)passwordFlag);
-
-            sendConnackAndClose(client, 0x04); // Bad user name or password
-
-            return;
-        }
-    }
-
-    // --- Username / Password Strings sicher einlesen ---
-
-    username = "";
-
-    password = "";
-
-    if (usernameFlag)
-
-    {
-
-        if (offset + 2 > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Username-Länge!");
-
-            return;
-        }
-
-        uint16_t usernameLen = (data[offset] << 8) | data[offset + 1];
-
-        offset += 2;
-
-        if (offset + usernameLen > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Username!");
-
-            return;
-        }
-
-        if (usernameLen >= 256)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Username too long!");
-
-            return;
-        }
-
-        char usernameBuffer[256] = {0};
-
-        memcpy(usernameBuffer, data + offset, usernameLen);
-
-        username = String(usernameBuffer);
-
-        offset += usernameLen;
-    }
-
-    if (passwordFlag)
-
-    {
-
-        if (offset + 2 > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Password-Länge!");
-
-            return;
-        }
-
-        uint16_t passwordLen = (data[offset] << 8) | data[offset + 1];
-
-        offset += 2;
-
-        if (offset + passwordLen > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "❌ Zu kurz für Password!");
-
-            return;
-        }
-
-        if (passwordLen >= 256)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Password too long!");
-
-            return;
-        }
-
-        char passwordBuffer[256] = {0};
-
-        memcpy(passwordBuffer, data + offset, passwordLen);
-
-        password = String(passwordBuffer);
-
-        offset += passwordLen;
-    }
-
     // --- AUTH-Log im Rahmenformat ---
     if (debugLevel >= DEBUG_INFO)
     {
@@ -1295,58 +1039,64 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t
         logMessage(DEBUG_INFO, "%s", authFrame.c_str());
         // BP3-01: Zusammenfassung nur bei DEBUG_DEBUG (Auth-Frame oben enthält bereits alle Infos)
         logMessage(DEBUG_DEBUG, "--- MQTT Client Connect Info ---");
-        logMessage(DEBUG_DEBUG, "ClientID      : %s", client->clientId.c_str());
+        logMessage(DEBUG_DEBUG, "ClientID      : %s", clientId.c_str());
         logMessage(DEBUG_DEBUG, "Username      : '%s' (len=%u)", username.c_str(), (unsigned)username.length());
         logMessage(DEBUG_DEBUG, "Password      : %s (len=%u)", password.isEmpty() ? "<empty>" : "<set>", (unsigned)password.length());
         logMessage(DEBUG_DEBUG, "Flags(usr/pwd): %d / %d", (int)usernameFlag, (int)passwordFlag);
         logMessage(DEBUG_DEBUG, "CleanSession  : %s", cleanSession ? "true" : "false");
         logMessage(DEBUG_DEBUG, "KeepAlive     : %u", (unsigned)keepAlive);
-        logMessage(DEBUG_DEBUG, "ProtoVersion  : %u", (unsigned)client->protocolVersion);
+        logMessage(DEBUG_DEBUG, "ProtoVersion  : %u", (unsigned)protocolLevel);
         logMessage(DEBUG_DEBUG, "--------------------------------");
     }
-
-    // --- Authentifizierung ---
-
-    logMessage(DEBUG_DEBUG, "Checking authentication…");
-
-    if (!authenticateClient(username, password))
-
+    if (!isClientActive(transport, client)) return;
+    const bool authFlagsValid = !cfgUserSet || (usernameFlag && (!cfgPassSet || passwordFlag));
+    const bool authenticated = authFlagsValid && authenticateClient(username, password);
+    if (!isClientActive(transport, client)) return;
+    if (!authenticated)
     {
-
-        logMessage(DEBUG_ERROR, "🚫 Authentication failed – Reject (0x04)");
-
-        sendConnackAndClose(client, 0x04); // Bad user name or password
-
+        sendConnackAndClose(client, 0x04);
         return;
     }
-
-    logMessage(DEBUG_INFO, "✅ Auth OK – Verbindung akzeptiert");
-
-    // Erfolg: CONNACK senden
-
-    uint8_t connack[] = {0x20, 0x02, (uint8_t)(cleanSession ? 0x00 : (sessionActuallyRestored ? 0x01 : 0x00)), 0x00};
-
-    client->client->write((const char *)connack, sizeof(connack));
-
-    client->connected = true;
-
-    // Callback & Liste führen
-
+    std::unique_ptr<uint8_t[]> willPayload;
+    if (willLen)
     {
-
-        IPAddress ip = client->client->remoteIP();
-
-        String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
-
-        connectedClientsInfo[client->clientId] = ipStr; // Immer aktualisieren, nicht nur bei Callback (BP2-06)
-
-        if (clientConnectCallback) {
-            clientConnectCallback(client->clientId, ipStr, username, password.length());
-        }
+        willPayload.reset(new uint8_t[willLen]);
+        memcpy(willPayload.get(), willData, willLen);
     }
-
-    // Retained Messages pushen
-
+    auto sessionIt = persistentSessions.find(clientId);
+    const bool sessionActuallyRestored = !cleanSession && sessionIt != persistentSessions.end();
+    uint8_t connack[] = {0x20, 0x02, (uint8_t)(sessionActuallyRestored ? 0x01 : 0x00), 0x00};
+    if (transport->write((const char *)connack, sizeof(connack)) != sizeof(connack))
+    {
+        closeMQTTClient(client);
+        return;
+    }
+    // Erst jetzt annehmen. Bestehende Session-Wiederherstellung bewusst beibehalten.
+    client->clientId = clientId;
+    client->protocolVersion = protocolLevel;
+    client->cleanSession = cleanSession;
+    client->keepAlive = keepAlive;
+    if (sessionActuallyRestored)
+    {
+        client->subscriptions = sessionIt->second->subscriptions;
+        persistentSessions.erase(sessionIt);
+    }
+    client->willTopic = willTopic;
+    client->willQos = willQos;
+    client->willRetain = willRetain;
+    client->willPayload = std::move(willPayload);
+    client->willPayloadLen = willLen;
+    client->connected = true;
+    client->hasWill = willFlag; // MQTT-3.1.2-8: nur zur angenommenen Verbindung
+    const String ipStr = transport->remoteIP().toString();
+    connectedClientsInfo[clientId] = ipStr;
+    logMessage(DEBUG_INFO, "[BROKER] CONNECT cid=%s kaSec=%u", clientId.c_str(), keepAlive);
+    if (!isClientActive(transport, client)) return;
+    if (clientConnectCallback)
+    {
+        clientConnectCallback(clientId, ipStr, username, password.length());
+        if (!isClientActive(transport, client)) return;
+    }
     sendRetainedMessages(client);
 }
 
@@ -1401,7 +1151,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
         {
 
-            client->client->close();
+            closeMQTTClient(client);
         }
 
         return;
@@ -1531,6 +1281,45 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
 
 {
 
+    // MQTT-2.3.1-1, MQTT-3.8.3-1/-3 und MQTT-3-8.3-4:
+    // Erst das gesamte Paket validieren, bevor ein einziger Filter übernommen wird.
+    AsyncClient *transport = client->client;
+    if (length < 2 || (data[0] == 0 && data[1] == 0))
+    {
+        closeMQTTClient(client);
+        return;
+    }
+    size_t validationOffset = 2;
+    size_t filterCount = 0;
+    while (validationOffset < length)
+    {
+        const uint8_t *filterData = nullptr;
+        size_t filterLen = 0;
+        if (!readMQTTField(data, length, validationOffset, filterData, filterLen) ||
+            filterLen == 0 || filterLen > MQTT_MAX_TOPIC_SIZE ||
+            !validMQTTUTF8(filterData, filterLen) || validationOffset >= length ||
+            data[validationOffset++] > 2)
+        {
+            closeMQTTClient(client);
+            return;
+        }
+        String filter;
+        filter.concat((const char *)filterData, filterLen);
+        const bool validFilter = isValidTopicFilter(filter);
+        if (!isClientActive(transport, client)) return;
+        if (!validFilter)
+        {
+            closeMQTTClient(client);
+            return;
+        }
+        ++filterCount;
+    }
+    if (filterCount == 0)
+    {
+        closeMQTTClient(client);
+        return;
+    }
+
     if (length < 2)
 
     {
@@ -1588,9 +1377,10 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
 
         uint8_t requestedQoS = options & 0x03;
 
-        bool noLocal = (options & 0x04) != 0;
+        const bool noLocal = false; // MQTT 3.1.1: obere sechs Bits wurden bereits abgewiesen.
 
         logMessage(DEBUG_DEBUG, "Subscribe: Topic '%s', QoS %d, noLocal: %s", topicBuffer, requestedQoS, noLocal ? "true" : "false");
+        if (!isClientActive(transport, client)) return;
 
         if (isValidTopicFilter(topic))
 
@@ -1607,6 +1397,7 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
                     found = true;
                     logMessage(DEBUG_DEBUG, "Subscription for client '%s' to topic '%s' updated (QoS %d, noLocal %s).",
                                client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Yes" : "No");
+                    if (!isClientActive(transport, client)) return;
                     break;
                 }
             }
@@ -1622,12 +1413,15 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
             returnCodes.push_back(requestedQoS);
 
             logMessage(DEBUG_INFO, "Subscription for client '%s' to topic filter '%s' added (QoS %d, noLocal %s).", client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Yes" : "No");
+            if (!isClientActive(transport, client)) return;
 
             if (subscribeCallback)
 
             {
 
-                subscribeCallback(client->clientId, topic);
+                const String callbackClientId = client->clientId;
+                subscribeCallback(callbackClientId, topic);
+                if (!isClientActive(transport, client)) return;
             }
         }
 
@@ -1689,6 +1483,8 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
 void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, size_t length)
 
 {
+
+    AsyncClient *transport = client->client;
 
     if (length < 2)
 
@@ -1753,7 +1549,9 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, si
 
                 {
 
-                    unsubscribeCallback(client->clientId, topic);
+                    const String callbackClientId = client->clientId;
+                    unsubscribeCallback(callbackClientId, topic);
+                    if (!isClientActive(transport, client)) return;
                 }
 
                 it = client->subscriptions.erase(it);
@@ -1810,7 +1608,7 @@ void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
 
     {
 
-        client->client->close();
+        closeMQTTClient(client);
     }
 }
 
