@@ -138,19 +138,6 @@ Die `clientId` bezeichnet den MQTT-Client, von dem die Nachricht beim Broker ein
 Die bestehende JSON-/Text-Verarbeitung bleibt erhalten. Allgemeine Binärpayloads
 mit eingebetteten Nullbytes werden noch nicht durchgängig unverändert weitergeleitet.
 
-## Beispiele
-
-- [`examples/BasicBroker`](examples/BasicBroker) - Grundlegende Broker-Funktionalität
-- [`examples/WithWebServer`](examples/WithWebServer) - MQTT-Broker mit Webserver
-- [`examples/ControlLED`](examples/ControlLED) - Steuerung einer LED über MQTT
-- [`examples/SimpleMQTTBroker`](examples/SimpleMQTTBroker) - Einfacher MQTT-Broker ohne Extras
-- [`examples/MQTTClient`](examples/MQTTClient) - ESP32 als MQTT-Client
-- [`examples/DualModeBrokerClient`](examples/DualModeBrokerClient) - ESP32 als Broker und Client (umschaltbar)
-
-## GitHub Actions
-
-Dieses Repository nutzt GitHub Actions, um automatisch die `examples/BasicBroker`-Version bei jedem Push zu bauen.
-
 ## Autor
 
 **Kala69**
