@@ -49,7 +49,7 @@ Normative Grundlage:
 - [x] Native Fehlerfallprüfungen und ESP32-Build abschließen.
 - [x] Protokoll-, Wiederverbindungs-, Last- und automatische Schaltprüfungen abschließen.
 - [ ] Temporäre Testordner entfernen; nur notwendige Rückkehrdateien und kurze Zusammenfassung behalten.
-- [ ] Nur die elf freigegebenen Bibliotheksdateien auf GitHub veröffentlichen.
+- [x] Nur die elf freigegebenen Bibliotheksdateien auf GitHub veröffentlichen.
 
 ## Nur bei Bedarf
 
