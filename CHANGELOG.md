@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.0.223 - Oktober 2026 (lokal geprüft, Veröffentlichung vorbereitet)
+- Konfigurierbares Gesamtpaketlimit von standardmäßig 4096 Byte; vollständige Shelly-Statusmeldungen, keine separate 768-Byte-Payloadgrenze und keine stille Kürzung innerhalb des Limits.
+- Paketlängen, Packet-Identifier und Remaining Length prüfen; UNSUBSCRIBE vor Änderungen vollständig validieren; große SUBACK-Antworten korrekt kodieren.
+- Live-RETAIN, Topic-Matcher einschließlich `$`, höchste passende Subscription-QoS und Retained-Auswahl je angefragtem Filter korrigieren.
+- Publisher mit passendem Abonnement erhält seine Nachricht; explizites `excludeClientId` bleibt erhalten.
+- Allokationen im Matcher, SUBACK und temporären QoS-Zustand verringern; QoS 0/1/2 und öffentliche Callbacks erhalten.
+- Vollständige Sessions, Offline-Queue, QoS-2-Wiederaufnahme und Binärpayload-Weiterleitung bleiben offen; noch keine vollständige MQTT-3.1.1-Konformität.
+
 ## v2.0.222 - Oktober 2026
 - Empfang nach synchronem oder verzögertem Close sicher abbrechen; Clientzuordnung nach Handlern und relevanten Anwendungs-Callbacks erneut prüfen
 - Internes `closing`-/`connectSeen`-Tracking ohne Änderung der öffentlichen Broker-API

@@ -1,4 +1,4 @@
-// @ 2.0.222
+// @ 2.0.223
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -12,6 +12,14 @@ static void closeMQTTClient(MQTTClient *client)
     client->closing = true;
     client->connected = false;
     transport->close();
+}
+
+// Anzahl der Bytes fuer MQTT Remaining Length, ohne temporaere Allokation.
+static size_t mqttRemainingLengthBytes(size_t value)
+{
+    size_t count = 0;
+    do { ++count; value /= 128; } while (value);
+    return count;
 }
 
 // MQTT-1.5.3-1/-2: Wohlgeformtes UTF-8 ohne U+0000, Surrogate oder Overlongs.
@@ -317,13 +325,7 @@ void ESPAsyncMQTTBroker::checkTimeouts()
                             size_t remainingLength = 2 + topicLen + packet_id_len + outMsg.payloadLen;
 
                             // Header-Länge berechnen (1 Byte Fixheader + Variable-Length-Bytes)
-                            size_t header_len = 1;
-                            if (remainingLength <= 127)
-                                header_len += 1;
-                            else if (remainingLength <= 16383)
-                                header_len += 2;
-                            else
-                                header_len += 3;
+                            size_t header_len = 1 + mqttRemainingLengthBytes(remainingLength);
 
                             size_t packetSize = header_len + remainingLength;
                             auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
@@ -503,7 +505,7 @@ void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
                     multiplier *= 128;
                     remainingLengthBytes++;
 
-                    if (remainingLengthBytes > 4) {
+                    if (remainingLengthBytes == 4 && (encodedByte & 0x80)) {
                         broker->logMessage(DEBUG_ERROR, "Invalid MQTT Remaining Length");
                         mqttClient->rxBuffer.clear();
                         closeMQTTClient(mqttClient);
@@ -780,50 +782,43 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
         return;
     }
 
-    size_t multiplier = 1;
-
-    size_t value = 0;
-
-    uint8_t encodedByte;
-
-    size_t idx = 1;
-
+    // MQTT 2.2.3: maximal vier Laengenbytes, keine Restbytes im Einzelpaket.
+    size_t value = 0, multiplier = 1, idx = 1;
+    uint8_t encodedByte = 0;
     do
-
     {
-
-        if (idx >= len)
-
+        if (idx >= len || idx > 4)
         {
-
-            logMessage(DEBUG_ERROR, "Packet too short for full Remaining Length");
-
+            closeMQTTClient(client);
             return;
         }
-
         encodedByte = data[idx++];
-
-        value += (encodedByte & 127) * multiplier;
-
-        multiplier *= 128;
-
-        if (multiplier > 128 * 128 * 128)
-
+        value += (encodedByte & 0x7F) * multiplier;
+        if (idx == 5 && (encodedByte & 0x80))
         {
-
-            logMessage(DEBUG_ERROR, "Remaining Length has invalid format");
-
+            closeMQTTClient(client);
             return;
         }
-
-    } while ((encodedByte & 128) != 0);
-
-    if (len < idx + value)
-
+        multiplier *= 128;
+    } while (encodedByte & 0x80);
+    if (value != len - idx)
     {
-
-        logMessage(DEBUG_ERROR, "Packet incomplete or damaged");
-
+        closeMQTTClient(client);
+        return;
+    }
+    // MQTT 2.3.1 und 3.4..3.7: genau zwei ID-Bytes, niemals ID 0.
+    if (packetType == MQTT_PUBACK || packetType == MQTT_PUBREC ||
+        packetType == MQTT_PUBREL || packetType == MQTT_PUBCOMP)
+    {
+        if (value != 2 || (data[idx] == 0 && data[idx + 1] == 0))
+        {
+            closeMQTTClient(client);
+            return;
+        }
+    }
+    if ((packetType == MQTT_PINGREQ || packetType == MQTT_DISCONNECT) && value != 0)
+    {
+        closeMQTTClient(client);
         return;
     }
 
@@ -1097,7 +1092,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t
         clientConnectCallback(clientId, ipStr, username, password.length());
         if (!isClientActive(transport, client)) return;
     }
-    sendRetainedMessages(client);
+    // Wiederaufnahme bestehender Subscriptions ist kein neues SUBSCRIBE.
 }
 
 void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t length, uint8_t header)
@@ -1109,31 +1104,23 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
     bool retained = (header & 0x01) != 0;
 
     if (length < 2)
-
     {
-
-        logMessage(DEBUG_ERROR, "Publish packet too short");
-
+        closeMQTTClient(client);
         return;
     }
-
-    uint16_t topicLength = (data[0] << 8) | data[1];
-
-    if (2 + topicLength > length)
-
+    const size_t topicLength = (data[0] << 8) | data[1];
+    const size_t idLength = qos > 0 ? 2 : 0;
+    if (topicLength == 0 || topicLength > MQTT_MAX_TOPIC_SIZE ||
+        topicLength > length - 2 || length - 2 - topicLength < idLength ||
+        !validMQTTUTF8(data + 2, topicLength) ||
+        length - 2 - topicLength - idLength > MQTT_MAX_PAYLOAD_SIZE)
     {
-
-        logMessage(DEBUG_ERROR, "Publish packet too short for topic");
-
+        closeMQTTClient(client);
         return;
     }
-
-    if (topicLength > MQTT_MAX_TOPIC_SIZE)
-
+    if (qos > 0 && data[2 + topicLength] == 0 && data[3 + topicLength] == 0)
     {
-
-        logMessage(DEBUG_ERROR, "Topic too long: %u > %u", topicLength, MQTT_MAX_TOPIC_SIZE);
-
+        closeMQTTClient(client);
         return;
     }
 
@@ -1193,14 +1180,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
             uint32_t payloadLength = length - payloadOffset;
 
-            if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
 
-            {
-
-                logMessage(DEBUG_WARNING, "QoS 2 Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
-
-                payloadLength = MQTT_MAX_PAYLOAD_SIZE;
-            }
 
             IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
 
@@ -1227,14 +1207,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 
         uint32_t payloadLength = length - payloadOffset;
 
-        if (payloadLength > MQTT_MAX_PAYLOAD_SIZE)
 
-        {
-
-            logMessage(DEBUG_WARNING, "Payload will be truncated to %u (from %u)", MQTT_MAX_PAYLOAD_SIZE, payloadLength);
-
-            payloadLength = MQTT_MAX_PAYLOAD_SIZE;
-        }
 
         // Payload direkt als String konstruieren.
         // Auch leere MQTT-Payloads werden korrekt weitergeleitet.
@@ -1265,7 +1238,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
             originalPayload.c_str()
         );
 
-        publish(topic.c_str(), originalPayload.c_str(), retained, qos, client->clientId);
+        publish(topic.c_str(), originalPayload.c_str(), retained, qos);
 
         if (messageCallback)
 
@@ -1278,36 +1251,31 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
 }
 
 void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size_t length)
-
 {
-
-    // MQTT-2.3.1-1, MQTT-3.8.3-1/-3 und MQTT-3-8.3-4:
-    // Erst das gesamte Paket validieren, bevor ein einziger Filter übernommen wird.
     AsyncClient *transport = client->client;
     if (length < 2 || (data[0] == 0 && data[1] == 0))
     {
         closeMQTTClient(client);
         return;
     }
-    size_t validationOffset = 2;
-    size_t filterCount = 0;
-    while (validationOffset < length)
+    // MQTT 3.8.3: gesamtes Paket vor Aenderungen validieren.
+    size_t offset = 2, filterCount = 0;
+    while (offset < length)
     {
-        const uint8_t *filterData = nullptr;
-        size_t filterLen = 0;
-        if (!readMQTTField(data, length, validationOffset, filterData, filterLen) ||
-            filterLen == 0 || filterLen > MQTT_MAX_TOPIC_SIZE ||
-            !validMQTTUTF8(filterData, filterLen) || validationOffset >= length ||
-            data[validationOffset++] > 2)
+        const uint8_t *bytes = nullptr;
+        size_t size = 0;
+        if (!readMQTTField(data, length, offset, bytes, size) || size == 0 ||
+            size > MQTT_MAX_TOPIC_SIZE || !validMQTTUTF8(bytes, size) ||
+            offset >= length || data[offset++] > 2)
         {
             closeMQTTClient(client);
             return;
         }
         String filter;
-        filter.concat((const char *)filterData, filterLen);
-        const bool validFilter = isValidTopicFilter(filter);
+        filter.concat((const char *)bytes, size);
+        const bool valid = isValidTopicFilter(filter);
         if (!isClientActive(transport, client)) return;
-        if (!validFilter)
+        if (!valid)
         {
             closeMQTTClient(client);
             return;
@@ -1319,165 +1287,72 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
         closeMQTTClient(client);
         return;
     }
-
-    if (length < 2)
-
+    // Genau eine SUBACK-Allokation ohne Filter-/Returncode-Vektor.
+    const size_t remaining = 2 + filterCount;
+    uint8_t encoded[4];
+    size_t encodedSize = 0, rest = remaining;
+    do
     {
-
-        logMessage(DEBUG_ERROR, "Subscribe packet too short");
-
-        return;
-    }
-
-    uint16_t packetId = (data[0] << 8) | data[1];
-
-    size_t index = 2;
-
-    std::vector<uint8_t> returnCodes;
-
-    while (index < length)
-
-    {
-
-        if (index + 2 > length)
-
-            break;
-
-        uint16_t topicLength = (data[index] << 8) | data[index + 1];
-
-        index += 2;
-
-        if (index + topicLength > length)
-
-            break;
-
-        if (topicLength > MQTT_MAX_TOPIC_SIZE)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Subscribe topic too long: %u > %u", topicLength, MQTT_MAX_TOPIC_SIZE);
-
-            break;
-        }
-
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
-
-        memcpy(topicBuffer, data + index, topicLength);
-        topicBuffer[topicLength] = '\0';
-
-        String topic = String(topicBuffer);
-
-        index += topicLength;
-
-        if (index >= length)
-
-            break;
-
-        uint8_t options = data[index++];
-
-        uint8_t requestedQoS = options & 0x03;
-
-        const bool noLocal = false; // MQTT 3.1.1: obere sechs Bits wurden bereits abgewiesen.
-
-        logMessage(DEBUG_DEBUG, "Subscribe: Topic '%s', QoS %d, noLocal: %s", topicBuffer, requestedQoS, noLocal ? "true" : "false");
-        if (!isClientActive(transport, client)) return;
-
-        if (isValidTopicFilter(topic))
-
-        {
-
-            // BP2-04: Doppelte Subscriptions verhindern — MQTT-Spec erlaubt Update, nicht doppeln
-            bool found = false;
-            for (auto &existing : client->subscriptions)
-            {
-                if (existing.filter == topic)
-                {
-                    existing.qos = requestedQoS;
-                    existing.noLocal = noLocal;
-                    found = true;
-                    logMessage(DEBUG_DEBUG, "Subscription for client '%s' to topic '%s' updated (QoS %d, noLocal %s).",
-                               client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Yes" : "No");
-                    if (!isClientActive(transport, client)) return;
-                    break;
-                }
-            }
-            if (!found)
-            {
-                Subscription sub;
-                sub.filter = topic;
-                sub.qos = requestedQoS;
-                sub.noLocal = noLocal;
-                client->subscriptions.push_back(sub);
-            }
-
-            returnCodes.push_back(requestedQoS);
-
-            logMessage(DEBUG_INFO, "Subscription for client '%s' to topic filter '%s' added (QoS %d, noLocal %s).", client->clientId.c_str(), topic.c_str(), requestedQoS, noLocal ? "Yes" : "No");
-            if (!isClientActive(transport, client)) return;
-
-            if (subscribeCallback)
-
-            {
-
-                const String callbackClientId = client->clientId;
-                subscribeCallback(callbackClientId, topic);
-                if (!isClientActive(transport, client)) return;
-            }
-        }
-
-        else
-
-        {
-
-            logMessage(DEBUG_WARNING, "Subscription for client '%s' to invalid topic filter '%s' rejected.", client->clientId.c_str(), topic.c_str());
-
-            if (client->protocolVersion == MQTT_PROTOCOL_LEVEL_5)
-
-            {
-
-                returnCodes.push_back(0x8F);
-            }
-
-            else
-
-            {
-
-                returnCodes.push_back(0x80);
-            }
-        }
-    }
-
-    if (returnCodes.empty())
-
-    {
-
-        logMessage(DEBUG_ERROR, "No valid subscriptions in SUBSCRIBE packet");
-
-        return;
-    }
-
-    size_t subackLength = 2 + returnCodes.size();
-
-    std::unique_ptr<uint8_t[]> suback(new uint8_t[2 + subackLength]);
-
+        uint8_t byte = rest % 128;
+        rest /= 128;
+        encoded[encodedSize++] = byte | (rest ? 0x80 : 0);
+    } while (rest);
+    const size_t packetSize = 1 + encodedSize + remaining;
+    std::unique_ptr<uint8_t[]> suback(new uint8_t[packetSize]);
     suback[0] = MQTT_SUBACK << 4;
-
-    suback[1] = subackLength;
-
-    suback[2] = packetId >> 8;
-
-    suback[3] = packetId & 0xFF;
-
-    for (size_t i = 0; i < returnCodes.size(); i++)
-
+    memcpy(suback.get() + 1, encoded, encodedSize);
+    suback[1 + encodedSize] = data[0];
+    suback[2 + encodedSize] = data[1];
+    offset = 2;
+    size_t codeIndex = 3 + encodedSize;
+    while (offset < length)
     {
-
-        suback[4 + i] = returnCodes[i];
+        const uint8_t *bytes = nullptr;
+        size_t size = 0;
+        readMQTTField(data, length, offset, bytes, size);
+        Subscription requested;
+        requested.filter.concat((const char *)bytes, size);
+        requested.qos = data[offset++];
+        bool found = false;
+        for (auto &existing : client->subscriptions)
+        {
+            if (existing.filter == requested.filter)
+            {
+                existing.qos = requested.qos;
+                existing.noLocal = false;
+                found = true;
+                break;
+            }
+        }
+        if (!found) client->subscriptions.push_back(requested);
+        suback[codeIndex++] = requested.qos;
+        if (subscribeCallback)
+        {
+            const String id = client->clientId;
+            subscribeCallback(id, requested.filter);
+            if (!isClientActive(transport, client)) return;
+        }
     }
-
-    client->client->write((const char *)suback.get(), 2 + subackLength);
-
-    sendRetainedMessages(client);
+    if (transport->write((const char *)suback.get(), packetSize) != packetSize)
+    {
+        closeMQTTClient(client);
+        return;
+    }
+    suback.reset(); // SUBACK-Speicher vor dem Retained-Paketbau freigeben.
+    // MQTT-3.8.4-3/-4: nur angefragte Filter, inklusive Wiederholungen,
+    // jeweils mit ihrem QoS wie einzelne SUBSCRIBEs behandeln.
+    offset = 2;
+    while (offset < length)
+    {
+        const uint8_t *bytes = nullptr;
+        size_t size = 0;
+        readMQTTField(data, length, offset, bytes, size);
+        Subscription requested;
+        requested.filter.concat((const char *)bytes, size);
+        requested.qos = data[offset++];
+        sendRetainedMessages(client, requested);
+        if (!isClientActive(transport, client)) return;
+    }
 }
 
 void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, size_t length)
@@ -1486,12 +1361,36 @@ void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, si
 
     AsyncClient *transport = client->client;
 
-    if (length < 2)
-
+    if (length < 2 || (data[0] == 0 && data[1] == 0))
     {
-
-        logMessage(DEBUG_ERROR, "Unsubscribe packet too short");
-
+        closeMQTTClient(client);
+        return;
+    }
+    size_t validationOffset = 2, count = 0;
+    while (validationOffset < length)
+    {
+        const uint8_t *bytes = nullptr;
+        size_t size = 0;
+        if (!readMQTTField(data, length, validationOffset, bytes, size) ||
+            size == 0 || size > MQTT_MAX_TOPIC_SIZE || !validMQTTUTF8(bytes, size))
+        {
+            closeMQTTClient(client);
+            return;
+        }
+        String filter;
+        filter.concat((const char *)bytes, size);
+        const bool valid = isValidTopicFilter(filter);
+        if (!isClientActive(transport, client)) return;
+        if (!valid)
+        {
+            closeMQTTClient(client);
+            return;
+        }
+        ++count;
+    }
+    if (count == 0)
+    {
+        closeMQTTClient(client);
         return;
     }
 
@@ -1752,7 +1651,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
 
         logMessage(DEBUG_INFO, "PUBREL for packet ID %u received. Publishing QoS 2 message: Topic='%s'", packetId, msg.topic.c_str());
 
-        publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2, msg.originalClientId);
+        publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2);
 
         client->incomingQoS2Messages.erase(it);
     }
@@ -1814,69 +1713,31 @@ bool ESPAsyncMQTTBroker::topicMatches(const Subscription &subscription, const St
 }
 
 bool ESPAsyncMQTTBroker::topicMatches(const String &filter, const String &topic)
-
 {
-
-    const char *f = filter.c_str();
-
-    const char *t = topic.c_str();
-
-    while (*f && *t)
-
+    // MQTT 4.7: keine Kopien/Allokationen; leere Level sind echte Level.
+    const char *f = filter.c_str(), *t = topic.c_str();
+    if (!*f || !*t) return false;
+    if (*t == '$' && (*f == '#' || *f == '+')) return false;
+    for (;;)
     {
-
-        const char *f_end = strchr(f, '/');
-
-        const char *t_end = strchr(t, '/');
-
-        size_t f_len = f_end ? (size_t)(f_end - f) : strlen(f);
-
-        if (f_len == 1 && *f == '#')
-
-        {
-
-            return true;
-        }
-
-        if (f_len == 1 && *f == '+')
-
-        {
-
-            f = f_end ? f_end + 1 : f + f_len;
-
-            t = t_end ? t_end + 1 : t + strlen(t);
-
-            continue;
-        }
-
-        size_t t_len = t_end ? (size_t)(t_end - t) : strlen(t);
-
-        if (f_len != t_len || strncmp(f, t, f_len) != 0)
-
-        {
-
+        if (f[0] == '#' && f[1] == '\0') return true;
+        const char *fe = strchr(f, '/'), *te = strchr(t, '/');
+        const size_t fl = fe ? (size_t)(fe - f) : strlen(f);
+        const size_t tl = te ? (size_t)(te - t) : strlen(t);
+        if (!(fl == 1 && *f == '+') && (fl != tl || memcmp(f, t, fl) != 0))
             return false;
-        }
-
-        f = f_end ? f_end + 1 : f + f_len;
-
-        t = t_end ? t_end + 1 : t + t_len;
+        if (!fe) return !te;
+        if (!te) return strcmp(fe, "/#") == 0;
+        f = fe + 1;
+        t = te + 1;
     }
-
-    if (*f && strcmp(f, "/#") == 0)
-
-    {
-
-        return true;
-    }
-
-    return *f == *t;
 }
 
-void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
+void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client, const Subscription &sub)
 
 {
 
+    AsyncClient *transport = client->client;
     for (auto const &entry : retainedMessages)
 
     {
@@ -1892,125 +1753,115 @@ void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client)
             continue;
         }
 
-        for (auto &sub : client->subscriptions)
+        if (topicMatches(sub, msg->topic))
 
         {
 
-            if (topicMatches(sub, msg->topic))
+            size_t topicLength = msg->topic.length();
+
+            if (topicLength > MQTT_MAX_TOPIC_SIZE)
 
             {
 
-                size_t topicLength = msg->topic.length();
+                logMessage(DEBUG_ERROR, "Retained Topic too long: %u > %u", (unsigned)topicLength, MQTT_MAX_TOPIC_SIZE);
 
-                if (topicLength > MQTT_MAX_TOPIC_SIZE)
+                continue;
+            }
 
-                {
+            size_t actualPayloadLength = msg->length;
 
-                    logMessage(DEBUG_ERROR, "Retained Topic too long: %u > %u", (unsigned)topicLength, MQTT_MAX_TOPIC_SIZE);
+            if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
 
-                    continue;
-                }
+            {
 
-                size_t actualPayloadLength = msg->length;
+                logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
 
-                if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
+                actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
+            }
 
-                {
+            // MQTT: Zustellung maximal mit dem QoS der Subscription.
+            uint8_t final_qos = (msg->qos < sub.qos) ? msg->qos : sub.qos;
+            size_t packet_id_len = (final_qos > 0) ? 2 : 0;
+            size_t remainingLengthField = 2 + topicLength + packet_id_len + actualPayloadLength;
 
-                    logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
+            // BP2-02: Variable-Length-Encoding statt 1-Byte-Limit
+            size_t header_len = 1 + mqttRemainingLengthBytes(remainingLengthField);
 
-                    actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
-                }
+            size_t totalPacketLength = header_len + remainingLengthField;
 
-                // MQTT: Zustellung maximal mit dem QoS der Subscription.
-                uint8_t final_qos = (msg->qos < sub.qos) ? msg->qos : sub.qos;
-                size_t packet_id_len = (final_qos > 0) ? 2 : 0;
-                size_t remainingLengthField = 2 + topicLength + packet_id_len + actualPayloadLength;
+            if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
 
-                // BP2-02: Variable-Length-Encoding statt 1-Byte-Limit
-                size_t header_len = 1; // Fixed header byte
-                if (remainingLengthField <= 127)
-                    header_len += 1;
-                else if (remainingLengthField <= 16383)
-                    header_len += 2;
-                else
-                    header_len += 3;
+            {
 
-                size_t totalPacketLength = header_len + remainingLengthField;
+                logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) exceeds MQTT_MAX_PACKET_SIZE: %u > %u.", msg->topic.c_str(), (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
 
-                if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
+                continue;
+            }
 
-                {
+            std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
 
-                    logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) exceeds MQTT_MAX_PACKET_SIZE: %u > %u.", msg->topic.c_str(), (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
+            uint8_t *ptr = packet.get();
+            *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1) | 0x01;
 
-                    continue;
-                }
+            // Variable-Length-Encoding
+            size_t rem_len = remainingLengthField;
+            do
+            {
+                uint8_t byte = rem_len % 128;
+                rem_len /= 128;
+                if (rem_len > 0)
+                    byte |= 128;
+                *ptr++ = byte;
+            } while (rem_len > 0);
 
-                std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
+            *ptr++ = topicLength >> 8;
+            *ptr++ = topicLength & 0xFF;
 
-                uint8_t *ptr = packet.get();
-                *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1) | 0x01;
+            memcpy(ptr, msg->topic.c_str(), topicLength);
+            ptr += topicLength;
 
-                // Variable-Length-Encoding
-                size_t rem_len = remainingLengthField;
-                do
-                {
-                    uint8_t byte = rem_len % 128;
-                    rem_len /= 128;
-                    if (rem_len > 0)
-                        byte |= 128;
-                    *ptr++ = byte;
-                } while (rem_len > 0);
+            if (final_qos > 0)
+            {
+                uint16_t packetId = getNextPacketId();
+                *ptr++ = packetId >> 8;
+                *ptr++ = packetId & 0xFF;
 
-                *ptr++ = topicLength >> 8;
-                *ptr++ = topicLength & 0xFF;
-
-                memcpy(ptr, msg->topic.c_str(), topicLength);
-                ptr += topicLength;
-
-                if (final_qos > 0)
-                {
-                    uint16_t packetId = getNextPacketId();
-                    *ptr++ = packetId >> 8;
-                    *ptr++ = packetId & 0xFF;
-
-                    auto outMsg = std::make_unique<OutgoingQoSMessage>();
-                    outMsg->qos = final_qos;
-                    outMsg->retain = true;
-                    outMsg->topic = msg->topic;
-                    outMsg->payloadLen = actualPayloadLength;
-
-                    if (actualPayloadLength > 0 && msg->payload)
-                    {
-                        outMsg->payload = std::unique_ptr<uint8_t[]>(new uint8_t[actualPayloadLength]);
-                        memcpy(outMsg->payload.get(), msg->payload.get(), actualPayloadLength);
-                    }
-
-                    outMsg->sentTime = millis();
-                    outMsg->retryCount = 0;
-                    outMsg->packetId = packetId;
-                    outMsg->state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
-
-                    client->outgoingMessages[packetId] = std::move(*outMsg);
-                }
+                OutgoingQoSMessage outMsg;
+                outMsg.qos = final_qos;
+                outMsg.retain = true;
+                outMsg.topic = msg->topic;
+                outMsg.payloadLen = actualPayloadLength;
 
                 if (actualPayloadLength > 0 && msg->payload)
-
                 {
-
-                    memcpy(ptr, msg->payload.get(), actualPayloadLength);
+                    outMsg.payload = std::unique_ptr<uint8_t[]>(new uint8_t[actualPayloadLength]);
+                    memcpy(outMsg.payload.get(), msg->payload.get(), actualPayloadLength);
                 }
 
-                client->client->write((const char *)packet.get(), totalPacketLength);
+                outMsg.sentTime = millis();
+                outMsg.retryCount = 0;
+                outMsg.packetId = packetId;
+                outMsg.state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
 
-                logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic.c_str(), (unsigned)actualPayloadLength, final_qos);
-
-                break;
+                client->outgoingMessages[packetId] = std::move(outMsg);
             }
+
+            if (actualPayloadLength > 0 && msg->payload)
+
+            {
+
+                memcpy(ptr, msg->payload.get(), actualPayloadLength);
+            }
+
+            client->client->write((const char *)packet.get(), totalPacketLength);
+
+            logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic.c_str(), (unsigned)actualPayloadLength, final_qos);
+
+            if (!isClientActive(transport, client)) return;
         }
     }
 }
+
 
 // BP3-06: isUserAllowed() als toter Code entfernt
 
@@ -2258,10 +2109,16 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
 
     {
 
-        logMessage(DEBUG_WARNING, "Payload will be truncated: %u > %u", (unsigned)payloadLen, MQTT_MAX_PAYLOAD_SIZE);
-
-        payloadLen = MQTT_MAX_PAYLOAD_SIZE;
+        logMessage(DEBUG_WARNING, "Payload exceeds packet limit: %u > %u", (unsigned)payloadLen, MQTT_MAX_PAYLOAD_SIZE);
+        return false;
     }
+
+    // Kein separates 768-Byte-Limit: ein vollstaendiges PUBLISH muss passen.
+    // Vor Retained-Speicherung oder QoS-State pruefen, niemals still kuerzen.
+    const size_t bodySize = 2 + topicLen + (qos > 0 ? 2 : 0) + payloadLen;
+    const size_t wireSize = bodySize + 1 + mqttRemainingLengthBytes(bodySize);
+    if (qos > MQTT_QOS2 || wireSize > MQTT_MAX_PACKET_SIZE)
+        return false;
 
     logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
 
@@ -2314,149 +2171,140 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
             continue;
         }
 
+        bool matched = false;
+        uint8_t maxQos = 0;
         for (const auto &sub : c->subscriptions)
-
         {
-
             if (topicMatches(sub, topicStr))
+            {
+                matched = true;
+                if (sub.qos > maxQos) maxQos = sub.qos;
+                if (maxQos >= qos) break;
+            }
+        }
+        if (matched)
+        {
+            // MQTT-3.3.5-1: Maximum aller passenden Subscriptions.
+            uint8_t final_qos = qos < maxQos ? qos : maxQos;
+
+            size_t packet_id_len = (final_qos > 0) ? 2 : 0;
+
+            size_t remainingLength = 2 + topicLen + packet_id_len + payloadLen;
+
+            // Basic check for remaining length encoding
+
+            if (remainingLength > 2097151)
+
+            { // Max for 3 bytes
+
+                logMessage(DEBUG_ERROR, "Message too large to encode. Topic: %s", topicStr.c_str());
+
+                continue; // Skip this client
+            }
+
+            size_t header_len = 1 + mqttRemainingLengthBytes(remainingLength);
+
+            size_t packetSize = header_len + remainingLength;
+
+            auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
+
+            uint8_t *ptr = packet.get();
+
+            *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1);
+
+            // Encode remaining length
+
+            size_t rem_len = remainingLength;
+
+            do
 
             {
 
-                // MQTT: Effektiver Zustell-QoS ist der kleinere Wert aus Publish- und Subscription-QoS.
-                uint8_t final_qos = (qos < sub.qos) ? qos : sub.qos;
+                uint8_t byte = rem_len % 128;
 
-                size_t packet_id_len = (final_qos > 0) ? 2 : 0;
+                rem_len /= 128;
 
-                size_t remainingLength = 2 + topicLen + packet_id_len + payloadLen;
-
-                // Basic check for remaining length encoding
-
-                if (remainingLength > 2097151)
-
-                { // Max for 3 bytes
-
-                    logMessage(DEBUG_ERROR, "Message too large to encode. Topic: %s", topicStr.c_str());
-
-                    continue; // Skip this client
-                }
-
-                size_t header_len = 1;
-
-                if (remainingLength <= 127)
-
-                    header_len += 1;
-
-                else if (remainingLength <= 16383)
-
-                    header_len += 2;
-
-                else
-
-                    header_len += 3;
-
-                size_t packetSize = header_len + remainingLength;
-
-                auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-
-                uint8_t *ptr = packet.get();
-
-                *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1) | (retained ? 1 : 0);
-
-                // Encode remaining length
-
-                size_t rem_len = remainingLength;
-
-                do
+                if (rem_len > 0)
 
                 {
 
-                    uint8_t byte = rem_len % 128;
-
-                    rem_len /= 128;
-
-                    if (rem_len > 0)
-
-                    {
-
-                        byte |= 128;
-                    }
-
-                    *ptr++ = byte;
-
-                } while (rem_len > 0);
-
-                *ptr++ = topicLen >> 8;
-
-                *ptr++ = topicLen & 0xFF;
-
-                memcpy(ptr, topicStr.c_str(), topicLen);
-
-                ptr += topicLen;
-
-                if (final_qos > 0)
-
-                {
-
-                    uint16_t packetId = getNextPacketId();
-
-                    *ptr++ = packetId >> 8;
-
-                    *ptr++ = packetId & 0xFF;
-
-                    auto outMsg = std::make_unique<OutgoingQoSMessage>();
-
-                    outMsg->qos = final_qos;
-
-                    outMsg->retain = retained;
-
-                    outMsg->topic = topicStr;
-
-                    outMsg->payloadLen = payloadLen;
-
-                    if (payloadLen > 0)
-
-                    {
-
-                        outMsg->payload = std::unique_ptr<uint8_t[]>(new uint8_t[payloadLen]);
-
-                        memcpy(outMsg->payload.get(), payload, payloadLen);
-                    }
-
-                    outMsg->sentTime = millis();
-
-                    outMsg->retryCount = 0;
-
-                    outMsg->packetId = packetId;
-
-                    outMsg->state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
-
-                    c->outgoingMessages[packetId] = std::move(*outMsg);
-
-                    logMessage(DEBUG_DEBUG, "Storing outgoing QoS %d message for client '%s' (packet ID %u)", final_qos, c->clientId.c_str(), packetId);
+                    byte |= 128;
                 }
+
+                *ptr++ = byte;
+
+            } while (rem_len > 0);
+
+            *ptr++ = topicLen >> 8;
+
+            *ptr++ = topicLen & 0xFF;
+
+            memcpy(ptr, topicStr.c_str(), topicLen);
+
+            ptr += topicLen;
+
+            if (final_qos > 0)
+
+            {
+
+                uint16_t packetId = getNextPacketId();
+
+                *ptr++ = packetId >> 8;
+
+                *ptr++ = packetId & 0xFF;
+
+                OutgoingQoSMessage outMsg;
+
+                outMsg.qos = final_qos;
+
+                outMsg.retain = false;
+
+                outMsg.topic = topicStr;
+
+                outMsg.payloadLen = payloadLen;
 
                 if (payloadLen > 0)
 
                 {
 
-                    memcpy(ptr, payload, payloadLen);
+                    outMsg.payload = std::unique_ptr<uint8_t[]>(new uint8_t[payloadLen]);
+
+                    memcpy(outMsg.payload.get(), payload, payloadLen);
                 }
 
-                bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
+                outMsg.sentTime = millis();
 
-                if (writeSuccess)
+                outMsg.retryCount = 0;
 
-                {
+                outMsg.packetId = packetId;
 
-                    sentCount++;
+                outMsg.state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
 
-                    messageSent = true;
-                }
+                c->outgoingMessages[packetId] = std::move(outMsg);
 
-                logMessage(DEBUG_DEBUG, "  - Sent PUBLISH to %s (QoS %d), Success: %s", c->clientId.c_str(), final_qos, writeSuccess ? "Yes" : "No");
-
-                break; // Message sent to this client for this topic, move to next client
+                logMessage(DEBUG_DEBUG, "Storing outgoing QoS %d message for client '%s' (packet ID %u)", final_qos, c->clientId.c_str(), packetId);
             }
+
+            if (payloadLen > 0)
+
+            {
+
+                memcpy(ptr, payload, payloadLen);
+            }
+
+            bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
+
+            if (writeSuccess)
+
+            {
+
+                sentCount++;
+
+                messageSent = true;
+            }
+
+            logMessage(DEBUG_DEBUG, "  - Sent PUBLISH to %s (QoS %d), Success: %s", c->clientId.c_str(), final_qos, writeSuccess ? "Yes" : "No");
+
         }
     }
 
@@ -2464,6 +2312,7 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size
 
     return messageSent;
 }
+
 
 bool ESPAsyncMQTTBroker::isValidTopicFilter(const String &filter)
 

@@ -16,17 +16,37 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 
 ## Aktueller Implementierungsstand
 
-Stand: **2.0.222**. MQTT **3.1.1** ist der aktive unterstützte Protokollstand.
+Stand: **2.0.223**. MQTT **3.1.1** ist der aktive unterstützte Protokollstand.
 MQTT **5 wird nicht unterstützt**. Die Bibliothek beansprucht weiterhin keine
 vollständige MQTT-3.1.1-Konformität.
 
-**Stabiler geprüfter Stand: Tag `v2.0.222`.** 50 lokale C++-Tests sowie
-55 Tests auf dem echten Broker sind bestanden. Die dokumentierten
-Fingerprint-/MQTT-/Ausgangspfade mit Parip99 `.99`, gumi77 `.77` und
-Shelly `.127` wurden geprüft. Eine genaue physische 500-ms-Pulsdauer wurde
-nicht separat bestätigt. Details stehen in `agent_worklog.md`.
-Weitere MQTT-3.1.1-Restpunkte werden ausschließlich in einer folgenden
-Version bearbeitet; 2.0.222 bleibt eingefroren.
+Der bisherige Stand bleibt unter Tag `v2.0.222` erhalten.
+Offene MQTT-3.1.1-Arbeiten stehen in [TODO.md](TODO.md).
+
+### Paket- und Zustellungskorrekturen in 2.0.223
+
+Paket 1 aus der TODO-Liste ist umgesetzt: Paketlängen und Packet-Identifier,
+große SUBACK-Antworten, Live-RETAIN, Topic-Matcher einschließlich `$`, höchste
+Subscription-QoS-Auswahl und gezielte Retained-Auswahl je angefragtem Filter.
+
+Live-Nachrichten werden einmal je Client mit dem höchsten passenden
+Subscription-QoS zugestellt, begrenzt durch den Publish-QoS. QoS-bedingte
+Wiederholungen bleiben erhalten. Mehrfilter-SUBSCRIBE wird wie einzelne
+SUBSCRIBEs behandelt; passende Retained-Nachrichten können deshalb je Filter
+erneut kommen. Alte, im aktuellen Paket nicht angefragte Filter lösen keine
+erneute Retained-Zustellung aus.
+
+**Verhaltensänderung:** Auch der ursprüngliche MQTT-Publisher erhält die
+Nachricht, wenn er ein passendes Abonnement hat. Der automatische Ausschluss
+entfällt gemäß Benutzerentscheidung zugunsten MQTT 3.1.1. Die ausdrücklich
+aufrufbare Broker-API-Option `excludeClientId` bleibt erhalten. Anwendungen
+müssen eigene empfangene Nachrichten entsprechend behandeln.
+
+Der Matcher benötigt keine zusätzlichen Allokationen. SUBACK kommt ohne
+temporären Returncode-/Filter-Vektor aus. QoS 0/1/2 bleiben erhalten;
+begrenzter ESP32-Speicher rechtfertigt keine still gekürzten MQTT-Nutzdaten.
+Eingehende PUBLISH-Gesamtpakete oberhalb des konfigurierten Limits werden
+vor Bestätigung abgewiesen.
 
 ### Stabilitäts- und Validierungskorrekturen in 2.0.222
 
@@ -57,18 +77,12 @@ Normative Grundlage: [OASIS MQTT 3.1.1 einschließlich Approved Errata 01](https
 
 ### Bewusst offene Einschränkungen
 
-- Topic-Matcher-Randfälle und `$`-Wildcard-Sonderregel
-- Auswahl des höchsten QoS bei überlappenden Subscriptions
-- RETAIN-Flag bei Live-Zustellung und Retained-Auswahl über mehrere alte Filter
-- Mehrbyte-Remaining-Length bei großen SUBACK-Antworten
 - Vollständige Binärpayload-Weiterleitung sowie globale UTF-8-Prüfung aller Paketarten
 - Vollständige persistente Sessions, Offline-QoS-Queue und QoS-2-Wiederaufnahme
-- Weitere Paketlängen-/Identifierprüfungen außerhalb CONNECT/SUBSCRIBE,
-  Ressourcenlimits und allgemeine Task-Synchronisierung
-- Bestehender Ausschluss des ursprünglichen Publishers bleibt erhalten.
+- Ressourcenlimits, erschöpfte Packet-Identifier und allgemeine Task-Synchronisierung
 
 `ignoreLoopDeliver` bleibt ohne Laufzeitwirkung. `excludeClientId`, Topics,
-JSON-Verarbeitung und Zustell-QoS wurden funktional nicht verändert.
+JSON-Format und öffentliche Callback-Schnittstellen bleiben erhalten.
 
 ## Installation
 
@@ -144,3 +158,7 @@ Dieses Repository nutzt GitHub Actions, um automatisch die `examples/BasicBroker
 ## Lizenz
 
 MIT License
+
+Das Standard-Paketlimit ist 4096 Byte inklusive Topic/Header, per
+`-D MQTT_MAX_PACKET_SIZE=8192` bei Bedarf konfigurierbar. Eine separate
+768-Byte-Payloadgrenze besteht nicht mehr. Speicher wird nach Bedarf belegt.

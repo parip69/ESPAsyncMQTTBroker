@@ -28,3 +28,10 @@ Thumbs.db
 .gitconfig
 compile_commands.json
 .cache/
+
+# Python-Testartefakte
+__pycache__/
+*.pyc
+
+# Testprogramme bleiben auf Benutzerwunsch lokal.
+/tests/

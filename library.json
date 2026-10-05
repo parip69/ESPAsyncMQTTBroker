@@ -1,6 +1,6 @@
 {
   "name": "ESPAsyncMQTTBroker",
-  "version": "2.0.222",
+  "version": "2.0.223",
   "description": "MQTT Broker für ESP32, asynchron und leichtgewichtig.",
   "keywords": "mqtt, broker, esp32, async",
   "repository": {

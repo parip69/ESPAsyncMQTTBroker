@@ -1,5 +1,5 @@
 // ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️️
-// @ 2.0.222
+// @ 2.0.223
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -34,9 +34,14 @@
 // Andere Konstanten
 #define MQTT_PROTOCOL_LEVEL 4   // MQTT 3.1.1
 #define MQTT_PROTOCOL_LEVEL_5 5 // MQTT 5.0
-#define MQTT_MAX_PACKET_SIZE 1280  // BP2-07: 1024→1280 damit Retained Messages mit Topic+Payload >127 Bytes Remaining-Length sicher passen
-#define MQTT_MAX_TOPIC_SIZE 256   // Maximale Größe für Topic
-#define MQTT_MAX_PAYLOAD_SIZE 768 // Maximale Größe für Payload
+#ifndef MQTT_MAX_PACKET_SIZE
+#define MQTT_MAX_PACKET_SIZE 4096 // Gesamtpaket inklusive Topic und Header; Speicher nach Bedarf.
+#endif
+#ifndef MQTT_MAX_TOPIC_SIZE
+#define MQTT_MAX_TOPIC_SIZE 256   // Per Build konfigurierbare Topic-Grenze.
+#endif
+// Payload nutzt den vorhandenen Paketrahmen; Topic/Header zaehlen mit.
+#define MQTT_MAX_PAYLOAD_SIZE MQTT_MAX_PACKET_SIZE
 
 // Eigene Implementation von std::make_unique (ab C++14 Standard)
 #if __cplusplus < 201402L
@@ -296,7 +301,7 @@ private:
     bool isClientActive(AsyncClient *transport, const MQTTClient *identity) const;
     bool topicMatches(const Subscription &subscription, const String &topic);
     bool topicMatches(const String &subscription, const String &topic);
-    void sendRetainedMessages(MQTTClient *client);
+    void sendRetainedMessages(MQTTClient *client, const Subscription &subscription);
     bool authenticateClient(const String &username, const String &password);
     void onClient(AsyncClient *client);
     void checkTimeouts();
