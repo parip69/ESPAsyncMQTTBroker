@@ -1,6 +1,6 @@
 # TODO – ESPAsyncMQTTBroker
 
-Stand: 05.10.2026. Aktive Arbeitskopie: **2.0.223**.
+Stand: 05.10.2026. Aktive Arbeitskopie: **2.0.224**.
 Der bisherige Stand bleibt unter Tag **v2.0.222** erhalten.
 
 ## Paket 1 abgeschlossen
@@ -20,27 +20,36 @@ Der bisherige Stand bleibt unter Tag **v2.0.222** erhalten.
 - [x] Erste Shelly-Schaltung nach frischer Anmeldung bei Broker-Neustart prüfen.
 - [x] QoS 0/1/2, öffentliche Callbacks, bestehende Topics und Fingerprint-JSON erhalten.
 - [x] Normalbetrieb mit QoS 0 und `DEBUG_NONE` herstellen; COM-Ports freigeben.
-- [x] Tests, Benchmarks und ausführliche Prüfberichte lokal sichern und vom Upload ausschließen.
+- [x] Tests, Benchmarks und Prüfunterlagen vom Upload ausschließen.
 - [x] Dauerhafte Upload-Auswahl in `.gitignore`: nur Bibliotheksquellen, Metadaten, Lizenz und knappe Dokumentation; Test-, Hardware- und Beispieldateien ausschließen.
 - [ ] Abgeschlossene Testordner lokal aufräumen; Rückkehrdateien und kurze Zusammenfassung sind gesichert.
 - [ ] Ausgewählte Bibliotheksbeispiele in einer späteren Aufgabe ergänzen.
 - [x] Bibliotheksstand 2.0.223 auf GitHub veröffentlichen; nur die elf freigegebenen Bibliotheksdateien.
 
-## Paket 2: größere MQTT-3.1.1-Arbeiten
+## Paket 2 abgeschlossen
 
-- [ ] Binärpayloads einschließlich eingebetteter Nullbytes durchgängig unverändert weiterleiten; bestehende Text-Callbacks berücksichtigen.
-- [ ] UTF-8-Prüfung auf die übrigen vorgeschriebenen MQTT-Textfelder erweitern.
-- [ ] Persistente Sessions einschließlich Löschung und Wiederaufnahme vervollständigen.
-- [ ] Offline-QoS-Queue für persistente Sessions konzipieren und testen.
-- [ ] QoS-2-Zustand und Wiederaufnahme vervollständigen; DUP-/PUBREL-Wiederholungen berücksichtigen.
-- [ ] Ressourcenlimits, erschöpfte Packet-Identifier und Task-Synchronisierung anhand konkreter Fehlerfälle prüfen.
+- [x] Binärpayloads einschließlich eingebetteter Nullbytes durchgängig unverändert weiterleiten; bestehende Text-Callbacks berücksichtigen.
+- [x] UTF-8-Prüfung auf die übrigen vorgeschriebenen MQTT-Textfelder erweitern.
+- [x] Persistente Sessions einschließlich Löschung und Wiederaufnahme vervollständigen.
+- [x] Offline-QoS-Queue für persistente Sessions konzipieren und testen.
+- [x] QoS-2-Zustand und Wiederaufnahme vervollständigen; DUP-/PUBREL-Wiederholungen berücksichtigen.
+- [x] Ressourcenlimits, erschöpfte Packet-Identifier und Task-Synchronisierung anhand konkreter Fehlerfälle prüfen.
 
-2.0.223 beansprucht noch keine vollständige MQTT-3.1.1-Konformität.
-QoS-Funktionen werden nicht beschnitten. MQTT 5 und `noLocal` bleiben außerhalb
-dieses Vorhabens; `ignoreLoopDeliver` bleibt ohne Laufzeitwirkung.
+Paket 1 und 2 sind umgesetzt und geprüft. Die RAM-Speicherung und
+konfigurierbaren ESP32-Ressourcenlimits sind in README.md dokumentiert.
+Die Prüfungen ersetzen keine unabhängige Konformitätszertifizierung.
+MQTT 5 und `noLocal` bleiben außerhalb dieses Vorhabens;
+`ignoreLoopDeliver` bleibt ohne Laufzeitwirkung.
 
 Normative Grundlage:
 [OASIS MQTT 3.1.1 einschließlich Approved Errata 01](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/errata01/os/mqtt-v3.1.1-errata01-os-complete.html).
+
+## Veröffentlichung 2.0.224
+
+- [x] Native Fehlerfallprüfungen und ESP32-Build abschließen.
+- [x] Protokoll-, Wiederverbindungs-, Last- und automatische Schaltprüfungen abschließen.
+- [ ] Temporäre Testordner entfernen; nur notwendige Rückkehrdateien und kurze Zusammenfassung behalten.
+- [ ] Nur die elf freigegebenen Bibliotheksdateien auf GitHub veröffentlichen.
 
 ## Nur bei Bedarf
 

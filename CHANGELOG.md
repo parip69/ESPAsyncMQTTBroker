@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.0.224 - Oktober 2026
+- Binärpayloads einschließlich Nullbytes durchgängig erhalten; längenbewusste Publish-API und `onBinaryMessage` ergänzt, Text-Callback weiterhin verfügbar.
+- Vorgeschriebene UTF-8-Felder validiert; Binärpasswörter unverändert verglichen.
+- Persistente RAM-Sessions, CleanSession-Löschung, Offline-QoS-Queue und Wiederaufnahme beider QoS-2-Richtungen vervollständigt.
+- Original-Identifier, DUP und PUBREL bei Wiederaufnahme erhalten; keine Aufgabe angenommener QoS-Nachrichten nach drei Wiederholungen.
+- Konfigurierbare Ressourcenlimits mit Empfangs-/ACK-Reserve, SUBACK-Fehlercodes und atomarer Publish-Annahme; erschöpfte Identifier erkannt.
+- Task-Zugriffe und reentrante Callbacks abgesichert; sichere TCP-Freigabe nach Empfang und Rückgabe großer RX-Puffer.
+- `publish()` meldet Annahme auch ohne Empfänger; Client-Info wird als synchronisierte Map-Kopie zurückgegeben.
+
 ## v2.0.223 - Oktober 2026
 - Konfigurierbares Gesamtpaketlimit von standardmäßig 4096 Byte; vollständige Shelly-Statusmeldungen, keine separate 768-Byte-Payloadgrenze und keine stille Kürzung innerhalb des Limits.
 - Paketlängen, Packet-Identifier und Remaining Length prüfen; UNSUBSCRIBE vor Änderungen vollständig validieren; große SUBACK-Antworten korrekt kodieren.

@@ -1,8 +1,9 @@
-// @ 2.0.223
+// @ 2.0.224
 
 #include "ESPAsyncMQTTBroker.h"
 
 #include <cstdarg>
+#include <algorithm>
 
 // AsyncTCP kann onDisconnect synchron aufrufen und den MQTTClient freigeben.
 // Nach close() darf deshalb kein Zugriff mehr auf diesen Zustand erfolgen.
@@ -11,7 +12,9 @@ static void closeMQTTClient(MQTTClient *client)
     AsyncClient *transport = client->client;
     client->closing = true;
     client->connected = false;
-    transport->close();
+    // AsyncTCP greift nach onData noch auf den Transport zu. Eigene Transporte
+    // erst in onPoll schliessen; dort ist close() die letzte Callback-Aktion.
+    if (!client->ownsTransport) transport->close();
 }
 
 // Anzahl der Bytes fuer MQTT Remaining Length, ohne temporaere Allokation.
@@ -85,18 +88,178 @@ bool ESPAsyncMQTTBroker::isClientActive(AsyncClient *transport, const MQTTClient
            !it->second->closing && transport->connected();
 }
 
-uint16_t ESPAsyncMQTTBroker::getNextPacketId()
 
+// String.concat(ptr,len) liest im ESP32-Core ein zusätzliches Byte.
+// Zeichenweise mit vorab reserviertem Speicher vermeiden wir diesen Überlauf.
+static String mqttString(const uint8_t *data, size_t length)
 {
+    String result;
+    result.reserve(length);
+    for (size_t i = 0; i < length; ++i) result.concat(static_cast<char>(data[i]));
+    return result;
+}
 
-    if (nextPacketId == 0)
+static size_t messageBytes(const OutgoingQoSMessage &message)
+{
+    return sizeof(OutgoingQoSMessage) + message.topic.length() + message.payloadLen;
+}
 
+static size_t mqttStorageBudget()
+{
+    return MQTT_MAX_STORED_BYTES > MQTT_RX_RESERVE_BYTES
+        ? MQTT_MAX_STORED_BYTES - MQTT_RX_RESERVE_BYTES : MQTT_MAX_STORED_BYTES / 2;
+}
+
+size_t ESPAsyncMQTTBroker::storedBytes() const
+{
+    size_t bytes = 0;
+    auto count = [&bytes](const std::shared_ptr<MQTTClient>& client) {
+        bytes += sizeof(MQTTClient) + client->clientId.length() + client->rxBuffer.capacity()
+               + client->willTopic.length() + client->willPayloadLen;
+        for (const auto &sub : client->subscriptions) bytes += sizeof(Subscription) + sub.filter.length();
+        for (const auto &entry : client->outgoingMessages) bytes += messageBytes(entry.second);
+        for (const auto &message : client->pendingMessages) bytes += messageBytes(message);
+        for (const auto &entry : client->incomingQoS2Messages)
+            bytes += sizeof(IncomingQoS2Message) + entry.second.topic.length() + entry.second.payload_len;
+    };
+    for (const auto &entry : clients) count(entry.second);
+    for (const auto &entry : persistentSessions) count(entry.second);
+    for (const auto &entry : retainedMessages)
+        bytes += sizeof(RetainedMessage) + entry.second->topic.length() + entry.second->length;
+    for (const auto &will : pendingWills)
+        bytes += sizeof(IncomingQoS2Message) + will.topic.length() + will.payload_len;
+    return bytes;
+}
+
+void ESPAsyncMQTTBroker::notifyMessage(const String& id, const String& topic,
+                                     const uint8_t *payload, size_t length)
+{
+    const auto textCallback = messageCallback;
+    const auto bytesCallback = binaryMessageCallback;
+    const String text = textCallback ? mqttString(payload, length) : String();
+    if (bytesCallback) bytesCallback(id, topic, payload, length);
+    if (textCallback) textCallback(id, topic, text);
+}
+
+void ESPAsyncMQTTBroker::disconnectClient(AsyncClient *transport)
+{
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    auto it = clients.find(transport);
+    if (it == clients.end()) return;
+    const auto client = it->second;
+    const String id = client->clientId;
+    const bool accepted = !id.isEmpty();
+    client->closing = true;
+    client->connected = false;
+    client->client = nullptr;
+    transport->onData(nullptr, nullptr);
+    transport->onError(nullptr, nullptr);
+    transport->onDisconnect(nullptr, nullptr);
+    transport->onPoll(nullptr, nullptr);
+    clients.erase(it);
+    connectedClientsInfo.erase(id);
+    std::vector<uint8_t>().swap(client->rxBuffer);
+    if (accepted && !client->cleanSession) persistentSessions[id] = client;
+    if (client->hasWill && !client->gracefulDisconnect)
     {
-
-        nextPacketId = 1;
+        IncomingQoS2Message will;
+        will.topic = client->willTopic;
+        will.payload = std::move(client->willPayload);
+        will.payload_len = client->willPayloadLen;
+        will.retained = client->willRetain;
+        will.qos = client->willQos;
+        pendingWills.push_back(std::move(will));
     }
+    client->hasWill = false;
+    client->willPayloadLen = 0;
+    client->willTopic = "";
+    while (!pendingWills.empty())
+    {
+        const auto &will = pendingWills.front();
+        if (!publishMessage(will.topic.c_str(), will.payload.get(), will.payload_len,
+                            will.retained, will.qos, "", false)) break;
+        pendingWills.pop_front();
+    }
+    flushMessages();
+    const auto callback = clientDisconnectCallback;
+    if (accepted && callback) callback(id);
+    if (client->ownsTransport) delete transport;
+}
 
-    return nextPacketId++;
+bool ESPAsyncMQTTBroker::sendMessage(MQTTClient *client, OutgoingQoSMessage &message, bool duplicate)
+{
+    AsyncClient *transport = client->client;
+    if (!transport || !isClientActive(transport, client) || !client->connected) return false;
+    if (message.state == OutgoingQoSState::AwaitingPubcomp)
+    {
+        uint8_t packet[] = {0x62, 2, static_cast<uint8_t>(message.packetId >> 8), static_cast<uint8_t>(message.packetId)};
+        message.sentTime = millis();
+        if (transport->write(reinterpret_cast<const char*>(packet), sizeof(packet)) != sizeof(packet))
+        {
+            if (isClientActive(transport, client)) closeMQTTClient(client);
+            return false;
+        }
+        return true;
+    }
+    const size_t topicLength = message.topic.length();
+    const size_t bodyLength = 2 + topicLength + (message.qos ? 2 : 0) + message.payloadLen;
+    const size_t length = 1 + mqttRemainingLengthBytes(bodyLength) + bodyLength;
+    std::unique_ptr<uint8_t[]> packet(new (std::nothrow) uint8_t[length]);
+    if (!packet) return false; // QoS-State bleibt für späteren Versuch erhalten.
+    uint8_t *p = packet.get();
+    *p++ = 0x30 | (message.qos << 1) | (message.retain ? 1 : 0) | (message.qos && duplicate ? 8 : 0);
+    size_t rest = bodyLength;
+    do { uint8_t byte = rest % 128; rest /= 128; *p++ = byte | (rest ? 128 : 0); } while (rest);
+    *p++ = topicLength >> 8; *p++ = topicLength;
+    memcpy(p, message.topic.c_str(), topicLength); p += topicLength;
+    if (message.qos) { *p++ = message.packetId >> 8; *p++ = message.packetId; }
+    if (message.payloadLen) memcpy(p, message.payload.get(), message.payloadLen);
+    message.transmitted = true;
+    message.sentTime = millis();
+    if (transport->write(reinterpret_cast<const char*>(packet.get()), length) != length)
+    {
+        if (isClientActive(transport, client)) closeMQTTClient(client);
+        return false;
+    }
+    return true;
+}
+
+void ESPAsyncMQTTBroker::pumpMessages(const std::shared_ptr<MQTTClient>& client)
+{
+    while (client->connected && !client->closing && !client->pendingMessages.empty())
+    {
+        if (client->pendingMessages.front().qos && client->outgoingMessages.size() >= MQTT_MAX_INFLIGHT_MESSAGES) return;
+        uint16_t id = client->pendingMessages.front().qos ? getNextPacketId(client.get()) : 0;
+        if (client->pendingMessages.front().qos && !id) return;
+        OutgoingQoSMessage message = std::move(client->pendingMessages.front());
+        client->pendingMessages.pop_front();
+        if (message.qos)
+        {
+            message.packetId = id;
+            auto inserted = client->outgoingMessages.emplace(id, std::move(message));
+            if (!sendMessage(client.get(), inserted.first->second, false)) return;
+        }
+        else if (!sendMessage(client.get(), message, false)) return;
+    }
+}
+
+void ESPAsyncMQTTBroker::flushMessages()
+{
+    std::array<std::shared_ptr<MQTTClient>, MQTT_MAX_CLIENTS> snapshot;
+    size_t count = 0;
+    for (const auto &entry : clients) if (count < snapshot.size()) snapshot[count++] = entry.second;
+    for (size_t i = 0; i < count; ++i) pumpMessages(snapshot[i]);
+}
+
+uint16_t ESPAsyncMQTTBroker::getNextPacketId(MQTTClient *client)
+{
+    for (uint32_t attempt = 0; attempt < 65535; ++attempt)
+    {
+        const uint16_t id = client->nextPacketId++;
+        if (!client->nextPacketId) client->nextPacketId = 1;
+        if (id && !client->outgoingMessages.count(id)) return id;
+    }
+    return 0;
 }
 
 // Zentrale Logging-Funktion
@@ -104,6 +267,7 @@ uint16_t ESPAsyncMQTTBroker::getNextPacketId()
 void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 
 {
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
 
     if (debugLevel == DEBUG_NONE)
         return; // Keine Ausgabe wenn DEBUG_NONE gesetzt
@@ -151,11 +315,12 @@ void ESPAsyncMQTTBroker::logMessage(DebugLevel level, const char *format, ...)
 
         // Wenn verfügbar, auch an Callback weiterleiten
 
-        if (loggingCallback)
+        const auto callback = loggingCallback;
+        if (callback)
 
         {
 
-            loggingCallback(level, message);
+            callback(level, message);
         }
     }
 }
@@ -187,6 +352,7 @@ ESPAsyncMQTTBroker::~ESPAsyncMQTTBroker()
 
 size_t ESPAsyncMQTTBroker::getConnectedClientCount() const
 {
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
     size_t count = 0;
     for (const auto &kv : clients)
     {
@@ -202,7 +368,9 @@ size_t ESPAsyncMQTTBroker::getConnectedClientCount() const
 void ESPAsyncMQTTBroker::begin()
 
 {
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
 
+    if (server) return;
     server.reset(new AsyncServer(port));
 
     server->onClient([](void *arg, AsyncClient *client)
@@ -215,11 +383,11 @@ void ESPAsyncMQTTBroker::begin()
 
 
 
-        broker->onClient(client); }, this);
+        broker->onClient(client, true); }, this);
 
     server->begin();
 
-    esp_timer_create_args_t timer_args;
+    esp_timer_create_args_t timer_args{};
 
     timer_args.callback = [](void *arg)
 
@@ -242,141 +410,81 @@ void ESPAsyncMQTTBroker::begin()
 
 void ESPAsyncMQTTBroker::loop()
 {
-    if (checkTimeoutsFlag)
-    {
-        checkTimeoutsFlag = false;
-        checkTimeouts();
-    }
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    if (checkTimeoutsFlag.exchange(false)) checkTimeouts();
 }
 
 void ESPAsyncMQTTBroker::stop()
-
 {
-
-    if (timeoutTimer)
-
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    if (timeoutTimer) { esp_timer_stop(timeoutTimer); esp_timer_delete(timeoutTimer); timeoutTimer = nullptr; }
+    if (server) { server->end(); server.reset(); }
+    checkTimeoutsFlag = false;
+    while (!clients.empty())
     {
-
-        esp_timer_stop(timeoutTimer);
-
-        esp_timer_delete(timeoutTimer);
-
-        timeoutTimer = NULL;
-    }
-
-    if (server)
-
-    {
-
-        server->end();
-
-        server.reset();
+        const auto client = clients.begin()->second;
+        AsyncClient *transport = client->client;
+        if (client->ownsTransport) {
+            // stop() darf aus onData aufgerufen werden. Aufraeumen ohne
+            // Broker-Zugriff im naechsten AsyncTCP-Poll oder Disconnect.
+            client->ownsTransport = false;
+            disconnectClient(transport);
+            transport->onDisconnect([](void*, AsyncClient *socket) { delete socket; }, nullptr);
+            transport->onPoll([](void*, AsyncClient *socket) {
+                socket->onDisconnect(nullptr, nullptr);
+                socket->close();
+                delete socket;
+            }, nullptr);
+        } else closeMQTTClient(client.get());
+        // Asynchroner Close darf keinen Callback auf den zerstoerten Broker hinterlassen.
+        if (clients.count(transport)) disconnectClient(transport);
     }
 }
 
 void ESPAsyncMQTTBroker::checkTimeouts()
 {
-    uint32_t now = millis();
-    const uint32_t retryTimeout = 5000; // 5 seconds
-    const uint8_t maxRetries = 3;
-
-    for (auto it = clients.begin(); it != clients.end();)
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    std::array<std::shared_ptr<MQTTClient>, MQTT_MAX_CLIENTS> snapshot;
+    size_t count = 0;
+    for (const auto &entry : clients) if (count < snapshot.size()) snapshot[count++] = entry.second;
+    const uint32_t now = millis();
+    for (size_t i = 0; i < count; ++i)
     {
-        auto &mqttClient = it->second;
-
-        if (mqttClient->closing)
+        const auto &client = snapshot[i];
+        if (client->closing) continue;
+        if ((!client->connected && now - client->lastActivity > 10000UL) ||
+            (client->connected && client->keepAlive && now - client->lastActivity > client->keepAlive * 1500UL))
         {
-            ++it;
-            continue;
+            closeMQTTClient(client.get()); continue;
         }
-
-        // Check for client keep-alive timeout
-        if (mqttClient->connected && mqttClient->keepAlive > 0 &&
-            (now - mqttClient->lastActivity > mqttClient->keepAlive * 1500UL))
+        std::array<uint16_t, MQTT_MAX_QUEUED_MESSAGES> ids;
+        size_t n = 0;
+        for (const auto &entry : client->outgoingMessages) if (n < ids.size()) ids[n++] = entry.first;
+        std::sort(ids.begin(), ids.begin() + n, [&client](uint16_t a, uint16_t b) {
+            return client->outgoingMessages.at(a).sequence < client->outgoingMessages.at(b).sequence;
+        });
+        for (size_t j = 0; j < n && client->connected && !client->closing; ++j)
         {
-            logMessage(DEBUG_INFO, "Client ⏰ inactive, disconnecting: %s", mqttClient->clientId.c_str());
-            MQTTClient *clientToClose = mqttClient.get();
-            it++;
-            closeMQTTClient(clientToClose);
+            auto found = client->outgoingMessages.find(ids[j]);
+            if (found != client->outgoingMessages.end() && now - found->second.sentTime > 5000UL)
+                sendMessage(client.get(), found->second, found->second.transmitted);
         }
-        else
-        {
-            // Check for outgoing QoS message timeouts
-            for (auto msgIt = mqttClient->outgoingMessages.begin(); msgIt != mqttClient->outgoingMessages.end();)
-            {
-                auto &outMsg = msgIt->second;
-                if (now - outMsg.sentTime > retryTimeout)
-                {
-                    if (outMsg.retryCount >= maxRetries)
-                    {
-                        logMessage(DEBUG_ERROR, "QoS %d message for client '%s' (packet ID %u) timed out after %d retries. Discarding.", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, maxRetries);
-                        msgIt = mqttClient->outgoingMessages.erase(msgIt);
-                    }
-                    else
-                    {
-                        logMessage(DEBUG_INFO, "QoS %d message for client '%s' (packet ID %u) timed out. Retrying (%d/%d)...", outMsg.qos, mqttClient->clientId.c_str(), outMsg.packetId, outMsg.retryCount + 1, maxRetries);
-                        outMsg.retryCount++;
-                        outMsg.sentTime = now;
-                        if (outMsg.state == OutgoingQoSState::AwaitingPuback || outMsg.state == OutgoingQoSState::AwaitingPubrec)
-                        {
-                            // BP2-01: Resend PUBLISH with DUP flag — Variable-Length-Encoding für Remaining-Length
-                            size_t topicLen = outMsg.topic.length();
-                            size_t packet_id_len = 2;
-                            size_t remainingLength = 2 + topicLen + packet_id_len + outMsg.payloadLen;
-
-                            // Header-Länge berechnen (1 Byte Fixheader + Variable-Length-Bytes)
-                            size_t header_len = 1 + mqttRemainingLengthBytes(remainingLength);
-
-                            size_t packetSize = header_len + remainingLength;
-                            auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-                            uint8_t *ptr = packet.get();
-                            *ptr++ = (MQTT_PUBLISH << 4) | (outMsg.qos << 1) | (outMsg.retain ? 1 : 0) | 0x08; // Set DUP flag
-
-                            // Variable-Length-Encoding
-                            size_t rem_len = remainingLength;
-                            do
-                            {
-                                uint8_t byte = rem_len % 128;
-                                rem_len /= 128;
-                                if (rem_len > 0)
-                                    byte |= 128;
-                                *ptr++ = byte;
-                            } while (rem_len > 0);
-
-                            *ptr++ = topicLen >> 8;
-                            *ptr++ = topicLen & 0xFF;
-                            memcpy(ptr, outMsg.topic.c_str(), topicLen);
-                            ptr += topicLen;
-                            *ptr++ = outMsg.packetId >> 8;
-                            *ptr++ = outMsg.packetId & 0xFF;
-                            if (outMsg.payloadLen > 0)
-                            {
-                                memcpy(ptr, outMsg.payload.get(), outMsg.payloadLen);
-                            }
-                            mqttClient->client->write((const char *)packet.get(), packetSize);
-                        }
-                        else if (outMsg.state == OutgoingQoSState::AwaitingPubcomp)
-                        {
-                            // Resend PUBREL
-                            uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(outMsg.packetId >> 8), (uint8_t)(outMsg.packetId & 0xFF)};
-                            mqttClient->client->write((const char *)pubrel, sizeof(pubrel));
-                        }
-                        ++msgIt;
-                    }
-                }
-                else
-                {
-                    ++msgIt;
-                }
-            }
-            ++it;
-        }
+        pumpMessages(client);
     }
+    while (!pendingWills.empty())
+    {
+        const auto &will = pendingWills.front();
+        if (!publishMessage(will.topic.c_str(), will.payload.get(), will.payload_len,
+                            will.retained, will.qos, "", false)) break;
+        pendingWills.pop_front();
+    }
+    flushMessages();
 }
 
 void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
 
 {
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
 
     brokerConfig = config;
 
@@ -388,7 +496,7 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
     if (!authAnonMode)
     {
         String list = brokerConfig.username;
-        int start = 0;
+        unsigned int start = 0;
 
         while (start < list.length())
         {
@@ -421,298 +529,92 @@ void ESPAsyncMQTTBroker::setConfig(const ESPAsyncMQTTBrokerConfig &config)
     logMessage(DEBUG_INFO, "   Auth required: %s", (brokerConfig.username != "" ? "Yes" : "No"));
 }
 
-void ESPAsyncMQTTBroker::onClient(AsyncClient *client)
-
+void ESPAsyncMQTTBroker::onClient(AsyncClient *transport, bool ownsTransport)
 {
-
-    auto mqttClient = std::unique_ptr<MQTTClient>(new MQTTClient());
-
-    mqttClient->client = client;
-
-    mqttClient->connected = false;
-
-    mqttClient->lastActivity = millis();
-
-    mqttClient->keepAlive = 0;
-
-    mqttClient->cleanSession = true;
-
-    mqttClient->hasWill = false;
-
-    mqttClient->gracefulDisconnect = false;
-
-    mqttClient->willQos = 0;
-
-    mqttClient->willRetain = false;
-
-    mqttClient->willPayloadLen = 0;
-
-    mqttClient->kaSeen = false;
-
-    client->onData([](void *arg, AsyncClient *client, void *data, size_t len)
-
-                   {
-
-
-
-        ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-
-
-
-        auto it = broker->clients.find(client);
-
-
-
-        if (it != broker->clients.end()) {
-
-
-
-            MQTTClient* mqttClient = it->second.get();
-
-            if (mqttClient->closing || !client->connected()) return;
-
-
-
-            const size_t maxBufferedBytes = MQTT_MAX_PACKET_SIZE * 4U;
-            if (len == 0 || mqttClient->rxBuffer.size() + len > maxBufferedBytes) {
-                broker->logMessage(DEBUG_ERROR, "Receive buffer exceeds limit: %u > %u",
-                                   (unsigned)(mqttClient->rxBuffer.size() + len),
-                                   (unsigned)maxBufferedBytes);
-                mqttClient->rxBuffer.clear();
-                closeMQTTClient(mqttClient);
-                return;
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    if (clients.size() >= MQTT_MAX_CLIENTS || storedBytes() + sizeof(MQTTClient) > MQTT_MAX_STORED_BYTES)
+    {
+        transport->close();
+        if (ownsTransport) delete transport;
+        return;
+    }
+    auto state = std::make_shared<MQTTClient>();
+    state->client = transport;
+    state->ownsTransport = ownsTransport;
+    state->lastActivity = millis();
+    clients[transport] = state;
+    transport->onData([](void *arg, AsyncClient *socket, void *bytes, size_t length) {
+        auto broker = static_cast<ESPAsyncMQTTBroker*>(arg);
+        std::lock_guard<std::recursive_mutex> lock(broker->stateMutex);
+        auto it = broker->clients.find(socket);
+        if (it == broker->clients.end()) return;
+        const auto state = it->second; // Auch bei reentranten Callbacks gültig.
+        if (!broker->isClientActive(socket, state.get()) || !length) return;
+        const size_t maxBuffered = MQTT_MAX_PACKET_SIZE * 4U;
+        const size_t newSize = state->rxBuffer.size() + length;
+        const size_t growth = newSize > state->rxBuffer.capacity() ? newSize - state->rxBuffer.capacity() : 0;
+        if (length > maxBuffered - state->rxBuffer.size() ||
+            growth > MQTT_MAX_STORED_BYTES - std::min<size_t>(broker->storedBytes(), MQTT_MAX_STORED_BYTES))
+        {
+            closeMQTTClient(state.get()); return;
+        }
+        const auto input = static_cast<const uint8_t*>(bytes);
+        if (growth) state->rxBuffer.reserve(newSize); // Kein unkontrolliertes geometrisches Wachstum.
+        state->rxBuffer.insert(state->rxBuffer.end(), input, input + length);
+        if (state->processingRx) return;
+        state->processingRx = true;
+        struct ProcessingGuard {
+            MQTTClient *state;
+            ~ProcessingGuard() { state->processingRx = false; }
+        } processing{state.get()};
+        size_t consumed = 0;
+        while (state->rxBuffer.size() - consumed >= 2)
+        {
+            size_t remaining = 0, multiplier = 1, header = 1;
+            bool complete = false;
+            for (size_t n = 0; n < 4; ++n)
+            {
+                if (consumed + header >= state->rxBuffer.size()) break;
+                const uint8_t byte = state->rxBuffer[consumed + header++];
+                remaining += (byte & 127) * multiplier;
+                if (!(byte & 128)) { complete = true; break; }
+                if (n == 3) { closeMQTTClient(state.get()); return; }
+                multiplier *= 128;
             }
-
-            const uint8_t *incoming = static_cast<const uint8_t *>(data);
-            mqttClient->rxBuffer.insert(mqttClient->rxBuffer.end(), incoming, incoming + len);
-
-            size_t consumed = 0;
-            while (mqttClient->rxBuffer.size() - consumed >= 2) {
-                size_t remainingLength = 0;
-                size_t multiplier = 1;
-                size_t headerLength = 1;
-                uint8_t encodedByte = 0;
-                uint8_t remainingLengthBytes = 0;
-                bool headerComplete = false;
-
-                do {
-                    if (consumed + headerLength >= mqttClient->rxBuffer.size()) {
-                        break;
-                    }
-
-                    encodedByte = mqttClient->rxBuffer[consumed + headerLength++];
-                    remainingLength += (encodedByte & 0x7F) * multiplier;
-                    multiplier *= 128;
-                    remainingLengthBytes++;
-
-                    if (remainingLengthBytes == 4 && (encodedByte & 0x80)) {
-                        broker->logMessage(DEBUG_ERROR, "Invalid MQTT Remaining Length");
-                        mqttClient->rxBuffer.clear();
-                        closeMQTTClient(mqttClient);
-                        return;
-                    }
-
-                    headerComplete = (encodedByte & 0x80) == 0;
-                } while (!headerComplete);
-
-                if (!headerComplete) {
-                    break;
-                }
-
-                const size_t packetSize = headerLength + remainingLength;
-                if (packetSize > MQTT_MAX_PACKET_SIZE) {
-                    broker->logMessage(DEBUG_ERROR, "Packet size exceeds limit: %u > %u",
-                                       (unsigned)packetSize,
-                                       (unsigned)MQTT_MAX_PACKET_SIZE);
-                    mqttClient->rxBuffer.clear();
-                    closeMQTTClient(mqttClient);
-                    return;
-                }
-
-                if (mqttClient->rxBuffer.size() - consumed < packetSize) {
-                    break;
-                }
-
-                broker->processPacket(mqttClient, mqttClient->rxBuffer.data() + consumed, packetSize);
-                // Kein Dereferenzieren der alten Identität: close() kann sie zerstört haben.
-                auto active = broker->clients.find(client);
-                if (active == broker->clients.end() || active->second.get() != mqttClient ||
-                    active->second->closing || !client->connected()) return;
-                mqttClient = active->second.get();
-                consumed += packetSize;
-            }
-
-            if (consumed > 0) {
-                mqttClient->rxBuffer.erase(mqttClient->rxBuffer.begin(),
-                                           mqttClient->rxBuffer.begin() + consumed);
-            }
-
-
-
-            mqttClient->lastActivity = millis();
-
-
-
-        } }, this);
-
-    client->onDisconnect([](void *arg, AsyncClient *client)
-
-                         {
-
-
-
-        ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-
-
-
-        auto it = broker->clients.find(client);
-
-
-
-        if (it != broker->clients.end()) {
-
-
-
-            auto& target = it->second;
-
-            target->closing = true;
-            target->connected = false;
-
-
-
-
-
-
-
-            if (target->hasWill && !target->gracefulDisconnect) {
-
-
-
-                broker->logMessage(DEBUG_INFO, "Unclean disconnect from client %s. Publishing LWT: Topic='%s', QoS=%d, Retain=%s",
-
-
-
-                                   target->clientId.c_str(), target->willTopic.c_str(), target->willQos, target->willRetain ? "Yes" : "No");
-
-
-
-                broker->publish(target->willTopic.c_str(), target->willPayload.get(), target->willPayloadLen, target->willRetain, target->willQos, "");
-
-
-
-                target->hasWill = false;
-
-
-
-            } else if (target->hasWill && target->gracefulDisconnect) {
-
-
-
-                broker->logMessage(DEBUG_DEBUG, "LWT for client %s not sent (clean disconnect already handled).", target->clientId.c_str());
-
-
-
-            }
-
-
-
-
-
-
-
-            // Disconnect-Callback + Aufräumen in beiden Branches (BP2-05)
-            String disconnectedClientId = target->clientId; // Vor std::move sichern
-
-            // QoS2-Eingangs-State liegt jetzt im MQTTClient.
-            // Bei cleanSession wird er mit dem Client zerstört.
-            // Bei persistenter Session bleibt er zusammen mit dem Client erhalten.
-
-            if (!target->cleanSession) {
-
-
-
-                broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), session will be kept.",
-
-
-
-                                 target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
-
-
-
-                broker->persistentSessions[target->clientId] = std::move(target);
-
-
-
-            } else {
-
-
-
-                broker->logMessage(DEBUG_INFO, "Client %s disconnected (graceful: %s), Clean Session, removing client.",
-
-
-
-                                 target->clientId.c_str(), target->gracefulDisconnect ? "Yes" : "No");
-
-
-
-            }
-
-            if (broker->clientDisconnectCallback) {
-                broker->clientDisconnectCallback(disconnectedClientId);
-            }
-            broker->connectedClientsInfo.erase(disconnectedClientId);
-
-
-
-            broker->clients.erase(it);
-
-
-
-        } }, this);
-
-    client->onError([](void *arg, AsyncClient *client, int8_t error)
-
-                    {
-
-
-
-        ESPAsyncMQTTBroker* broker = (ESPAsyncMQTTBroker*)arg;
-
-
-
-        auto it = broker->clients.find(client);
-
-
-
-        if (it != broker->clients.end()) {
-
-
-
-            MQTTClient* mqttClient = it->second.get();
-
-
-
-            if (broker->errorCallback && mqttClient) {
-
-
-
-                broker->logMessage(DEBUG_ERROR, "Client %s Error: %d", mqttClient->clientId.c_str(), error);
-
-
-
-                broker->errorCallback(mqttClient->clientId, error, "Client Error");
-
-
-
-            }
-
-
-
-        } }, this);
-
-    clients[client] = std::move(mqttClient);
-
-    logMessage(DEBUG_DEBUG, "New MQTT connection accepted (IP: %s)", client->remoteIP().toString().c_str());
+            if (!complete) break;
+            const size_t packetLength = header + remaining;
+            if (packetLength > MQTT_MAX_PACKET_SIZE) { closeMQTTClient(state.get()); return; }
+            if (state->rxBuffer.size() - consumed < packetLength) break;
+            // Eine Paketkopie hält Nutzdaten auch über Disconnect-/Stop-Callbacks gültig.
+            std::vector<uint8_t> packet(state->rxBuffer.begin() + consumed,
+                                        state->rxBuffer.begin() + consumed + packetLength);
+            broker->processPacket(state.get(), packet.data(), packet.size());
+            if (!broker->isClientActive(socket, state.get())) return;
+            consumed += packetLength;
+        }
+        if (consumed) state->rxBuffer.erase(state->rxBuffer.begin(), state->rxBuffer.begin() + consumed);
+        // Kleine Puffer wiederverwenden; grosse Pakete hinterlassen keinen dauerhaften RX-Speicher.
+        if (state->rxBuffer.empty() && state->rxBuffer.capacity() > 512)
+            std::vector<uint8_t>().swap(state->rxBuffer);
+    }, this);
+    transport->onDisconnect([](void *arg, AsyncClient *socket) {
+        static_cast<ESPAsyncMQTTBroker*>(arg)->disconnectClient(socket);
+    }, this);
+    transport->onPoll([](void *arg, AsyncClient *socket) {
+        auto broker = static_cast<ESPAsyncMQTTBroker*>(arg);
+        std::lock_guard<std::recursive_mutex> lock(broker->stateMutex);
+        auto it = broker->clients.find(socket);
+        if (it != broker->clients.end() && it->second->closing) socket->close();
+    }, this);
+    transport->onError([](void *arg, AsyncClient *socket, int8_t error) {
+        auto broker = static_cast<ESPAsyncMQTTBroker*>(arg);
+        std::lock_guard<std::recursive_mutex> lock(broker->stateMutex);
+        auto it = broker->clients.find(socket);
+        if (it == broker->clients.end()) return;
+        const auto state = it->second;
+        const auto callback = broker->errorCallback;
+        if (callback) callback(state->clientId, error, "Client Error");
+    }, this);
 }
 
 void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t len)
@@ -728,6 +630,7 @@ void ESPAsyncMQTTBroker::processPacket(MQTTClient *client, uint8_t *data, size_t
         return;
     }
 
+    client->lastActivity = millis();
     uint8_t header = data[0];
 
     uint8_t packetType = (header >> 4) & 0x0F;
@@ -952,11 +855,7 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t
         sendConnackAndClose(client, 0x02); // MQTT-3.1.3-8/-9
         return;
     }
-    if (userLen >= 256 || passwordLen >= 256)
-    {
-        sendConnackAndClose(client, 0x04);
-        return;
-    }
+
     if (willFlag && (willTopicLen == 0 || willTopicLen > MQTT_MAX_TOPIC_SIZE ||
                      willLen > MQTT_MAX_PAYLOAD_SIZE))
     {
@@ -964,10 +863,10 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t
         return;
     }
     String clientId, username, password, willTopic;
-    if (idLen) clientId.concat((const char *)idData, idLen);
-    if (userLen) username.concat((const char *)userData, userLen);
-    if (passwordLen) password.concat((const char *)passwordData, passwordLen);
-    if (willTopicLen) willTopic.concat((const char *)willTopicData, willTopicLen);
+    if (idLen) clientId = mqttString(idData, idLen);
+    if (userLen) username = mqttString(userData, userLen);
+    if (passwordLen) password = mqttString(passwordData, passwordLen);
+    if (willTopicLen) willTopic = mqttString(willTopicData, willTopicLen);
     AsyncClient *transport = client->client;
     if (willFlag && !isValidPublishTopic(willTopic))
     {
@@ -1055,25 +954,54 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t
     std::unique_ptr<uint8_t[]> willPayload;
     if (willLen)
     {
-        willPayload.reset(new uint8_t[willLen]);
+        willPayload.reset(new (std::nothrow) uint8_t[willLen]);
+        if (!willPayload) { sendConnackAndClose(client, 0x03); return; }
         memcpy(willPayload.get(), willData, willLen);
+    }
+
+    if (clientId.isEmpty())
+    {
+        do { clientId = String("auto-") + String(nextAssignedId++); }
+        while (connectedClientsInfo.count(clientId) || persistentSessions.count(clientId));
+    }
+    size_t sessions = persistentSessions.size();
+    for (const auto &entry : clients) if (!entry.second->cleanSession && !entry.second->clientId.isEmpty()) ++sessions;
+    bool exists = persistentSessions.count(clientId) != 0;
+    for (const auto &entry : clients)
+        if (!entry.second->cleanSession && entry.second->clientId == clientId) exists = true;
+    if ((!cleanSession && !exists && sessions >= MQTT_MAX_SESSIONS) ||
+        storedBytes() + willLen + willTopicLen + idLen > mqttStorageBudget())
+    { sendConnackAndClose(client, 0x03); return; }
+    std::shared_ptr<MQTTClient> previous;
+    for (const auto &entry : clients)
+        if (entry.second.get() != client && entry.second->clientId == clientId) { previous = entry.second; break; }
+    if (previous)
+    {
+        AsyncClient *old = previous->client;
+        closeMQTTClient(previous.get());
+        if (clients.count(old)) disconnectClient(old);
+        if (!isClientActive(transport, client)) return;
     }
     auto sessionIt = persistentSessions.find(clientId);
     const bool sessionActuallyRestored = !cleanSession && sessionIt != persistentSessions.end();
-    uint8_t connack[] = {0x20, 0x02, (uint8_t)(sessionActuallyRestored ? 0x01 : 0x00), 0x00};
-    if (transport->write((const char *)connack, sizeof(connack)) != sizeof(connack))
-    {
-        closeMQTTClient(client);
-        return;
-    }
-    // Erst jetzt annehmen. Bestehende Session-Wiederherstellung bewusst beibehalten.
+    uint8_t connack[] = {0x20, 2, static_cast<uint8_t>(sessionActuallyRestored ? 1 : 0), 0};
+    if (transport->write(reinterpret_cast<const char*>(connack), sizeof(connack)) != sizeof(connack))
+    { if (isClientActive(transport, client)) closeMQTTClient(client); return; }
+    if (!isClientActive(transport, client)) return;
     client->clientId = clientId;
     client->protocolVersion = protocolLevel;
     client->cleanSession = cleanSession;
     client->keepAlive = keepAlive;
-    if (sessionActuallyRestored)
+    if (sessionIt != persistentSessions.end())
     {
-        client->subscriptions = sessionIt->second->subscriptions;
+        if (sessionActuallyRestored)
+        {
+            client->subscriptions = std::move(sessionIt->second->subscriptions);
+            client->outgoingMessages = std::move(sessionIt->second->outgoingMessages);
+            client->pendingMessages = std::move(sessionIt->second->pendingMessages);
+            client->incomingQoS2Messages = std::move(sessionIt->second->incomingQoS2Messages);
+            client->nextPacketId = sessionIt->second->nextPacketId;
+        }
         persistentSessions.erase(sessionIt);
     }
     client->willTopic = willTopic;
@@ -1087,167 +1015,78 @@ void ESPAsyncMQTTBroker::handleConnect(MQTTClient *client, uint8_t *data, size_t
     connectedClientsInfo[clientId] = ipStr;
     logMessage(DEBUG_INFO, "[BROKER] CONNECT cid=%s kaSec=%u", clientId.c_str(), keepAlive);
     if (!isClientActive(transport, client)) return;
-    if (clientConnectCallback)
+
+    if (sessionActuallyRestored)
     {
-        clientConnectCallback(clientId, ipStr, username, password.length());
+        std::array<uint16_t, MQTT_MAX_QUEUED_MESSAGES> ids;
+        size_t count = 0;
+        for (const auto &entry : client->outgoingMessages) if (count < ids.size()) ids[count++] = entry.first;
+        std::sort(ids.begin(), ids.begin() + count, [client](uint16_t a, uint16_t b) {
+            return client->outgoingMessages.at(a).sequence < client->outgoingMessages.at(b).sequence;
+        });
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto message = client->outgoingMessages.find(ids[i]);
+            if (message != client->outgoingMessages.end()) sendMessage(client, message->second, message->second.transmitted);
+            if (!isClientActive(transport, client)) return;
+        }
+    }
+    pumpMessages(clients.at(transport));
+    if (!isClientActive(transport, client)) return;
+    const auto callback = clientConnectCallback;
+    if (callback)
+    {
+        callback(clientId, ipStr, username, password.length());
         if (!isClientActive(transport, client)) return;
     }
     // Wiederaufnahme bestehender Subscriptions ist kein neues SUBSCRIBE.
 }
 
 void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t length, uint8_t header)
-
 {
-
-    uint8_t qos = (header & 0x06) >> 1;
-
-    bool retained = (header & 0x01) != 0;
-
-    if (length < 2)
-    {
-        closeMQTTClient(client);
-        return;
-    }
+    const uint8_t qos = (header >> 1) & 3;
+    const bool retained = header & 1;
+    if (length < 2) { closeMQTTClient(client); return; }
     const size_t topicLength = (data[0] << 8) | data[1];
-    const size_t idLength = qos > 0 ? 2 : 0;
-    if (topicLength == 0 || topicLength > MQTT_MAX_TOPIC_SIZE ||
-        topicLength > length - 2 || length - 2 - topicLength < idLength ||
-        !validMQTTUTF8(data + 2, topicLength) ||
-        length - 2 - topicLength - idLength > MQTT_MAX_PAYLOAD_SIZE)
+    const size_t idLength = qos ? 2 : 0;
+    if (!topicLength || topicLength > MQTT_MAX_TOPIC_SIZE || topicLength > length - 2 ||
+        length - 2 - topicLength < idLength || !validMQTTUTF8(data + 2, topicLength))
+    { closeMQTTClient(client); return; }
+    const String topic = mqttString(data + 2, topicLength);
+    if (!isValidPublishTopic(topic)) { closeMQTTClient(client); return; }
+    size_t offset = 2 + topicLength;
+    const uint16_t id = qos ? (data[offset] << 8) | data[offset + 1] : 0;
+    if (qos && !id) { closeMQTTClient(client); return; }
+    offset += idLength;
+    const size_t payloadLength = length - offset;
+    AsyncClient *transport = client->client;
+    const String source = client->clientId;
+    if (qos == 2)
     {
-        closeMQTTClient(client);
+        // Bereits angenommene ID unverändert lassen, unabhängig vom DUP-Bit.
+        if (!client->incomingQoS2Messages.count(id))
+        {
+            if (client->incomingQoS2Messages.size() >= MQTT_MAX_QUEUED_MESSAGES ||
+                storedBytes() + sizeof(IncomingQoS2Message) + topicLength + payloadLength > mqttStorageBudget())
+            { closeMQTTClient(client); return; }
+            IncomingQoS2Message message(topic, data + offset, payloadLength, retained, source);
+            if (payloadLength && !message.payload) { closeMQTTClient(client); return; }
+            client->incomingQoS2Messages.emplace(id, std::move(message));
+        }
+        uint8_t pubrec[] = {0x50, 2, static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id)};
+        if (transport->write(reinterpret_cast<const char*>(pubrec), 4) != 4 && isClientActive(transport, client)) closeMQTTClient(client);
         return;
     }
-    if (qos > 0 && data[2 + topicLength] == 0 && data[3 + topicLength] == 0)
+    // Erst Eigentum für alle passenden Sessions übernehmen, dann bestätigen.
+    if (!publishMessage(topic.c_str(), data + offset, payloadLength, retained, qos, "", false))
+    { closeMQTTClient(client); return; }
+    if (qos == 1)
     {
-        closeMQTTClient(client);
-        return;
+        uint8_t puback[] = {0x40, 2, static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id)};
+        if (transport->write(reinterpret_cast<const char*>(puback), 4) != 4 && isClientActive(transport, client)) closeMQTTClient(client);
     }
-
-    // Topic direkt als String ohne 257-Byte Stack-Buffer konstruieren (BP1-03)
-    String topic;
-    topic.concat((const char *)(data + 2), topicLength);
-
-    if (!isValidPublishTopic(topic))
-
-    {
-
-        logMessage(DEBUG_ERROR, "Invalid Topic Name '%s' from client '%s'. Closing connection.", topic.c_str(), client->clientId.c_str());
-
-        if (client->client)
-
-        {
-
-            closeMQTTClient(client);
-        }
-
-        return;
-    }
-
-    size_t payloadOffset = 2 + topicLength;
-
-    uint16_t packetId = 0;
-
-    if (qos > 0)
-
-    {
-
-        if (payloadOffset + 2 > length)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Publish packet too short for QoS Packet-ID");
-
-            return;
-        }
-
-        packetId = (data[payloadOffset] << 8) | data[payloadOffset + 1];
-
-        payloadOffset += 2;
-
-        if (qos == 1)
-
-        {
-
-            uint8_t puback[] = {0x40, 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
-
-            client->client->write((const char *)puback, 4);
-        }
-
-        else if (qos == 2)
-
-        {
-
-            uint32_t payloadLength = length - payloadOffset;
-
-
-
-            IncomingQoS2Message qos2Msg(topic, data + payloadOffset, payloadLength, retained, client->clientId);
-
-            // packetId ist nur pro Verbindung eindeutig, daher Ablage pro Client
-            client->incomingQoS2Messages[packetId] = std::move(qos2Msg);
-
-            logMessage(DEBUG_INFO, "QoS 2 Publish received - Topic='%s', PacketID=%u. Sending PUBREC.", topic.c_str(), packetId);
-
-            uint8_t pubrec[] = {(MQTT_PUBREC << 4), 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
-
-            client->client->write((const char *)pubrec, 4);
-
-            return;
-        }
-    }
-
-    // Verteilung der Nachricht an Abonnenten für QoS 0 und QoS 1.
-
-    // (QoS 2 wird erst nach Abschluss des Handshakes in handlePubRel verteilt.)
-
-    if (qos == 0 || qos == 1)
-
-    {
-
-        uint32_t payloadLength = length - payloadOffset;
-
-
-
-        // Payload direkt als String konstruieren.
-        // Auch leere MQTT-Payloads werden korrekt weitergeleitet.
-        String originalPayload;
-
-        if (payloadLength > 0)
-
-        {
-
-            originalPayload.concat((const char *)(data + payloadOffset), payloadLength);
-        }
-
-        // Normales INFO-Log bleibt kompakt.
-        logMessage(
-            DEBUG_INFO,
-            "🔔 Weiterleiten (QoS %d, von %s) - Topic='%s', PayloadLen=%u, Retained=%s",
-            qos,
-            client->clientId.c_str(),
-            topic.c_str(),
-            (unsigned)payloadLength,
-            retained ? "Yes" : "No"
-        );
-
-        // Vollständige Nutzlast nur im ausführlichen Debug-Level.
-        logMessage(
-            DEBUG_DEBUG,
-            "Payload='%s'",
-            originalPayload.c_str()
-        );
-
-        publish(topic.c_str(), originalPayload.c_str(), retained, qos);
-
-        if (messageCallback)
-
-        {
-
-            messageCallback(client->clientId, topic, originalPayload);
-        }
-
-    }
+    flushMessages();
+    notifyMessage(source, topic, data + offset, payloadLength);
 }
 
 void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size_t length)
@@ -1272,7 +1111,7 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
             return;
         }
         String filter;
-        filter.concat((const char *)bytes, size);
+        filter = mqttString(bytes, size);
         const bool valid = isValidTopicFilter(filter);
         if (!isClientActive(transport, client)) return;
         if (!valid)
@@ -1298,21 +1137,34 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
         encoded[encodedSize++] = byte | (rest ? 0x80 : 0);
     } while (rest);
     const size_t packetSize = 1 + encodedSize + remaining;
-    std::unique_ptr<uint8_t[]> suback(new uint8_t[packetSize]);
+    std::unique_ptr<uint8_t[]> suback(new (std::nothrow) uint8_t[packetSize]);
+    if (!suback) { closeMQTTClient(client); return; }
     suback[0] = MQTT_SUBACK << 4;
     memcpy(suback.get() + 1, encoded, encodedSize);
     suback[1 + encodedSize] = data[0];
     suback[2 + encodedSize] = data[1];
     offset = 2;
     size_t codeIndex = 3 + encodedSize;
+    size_t reservedRetainedCount = 0, reservedRetainedBytes = 0;
     while (offset < length)
     {
         const uint8_t *bytes = nullptr;
         size_t size = 0;
         readMQTTField(data, length, offset, bytes, size);
         Subscription requested;
-        requested.filter.concat((const char *)bytes, size);
+        requested.filter = mqttString(bytes, size);
         requested.qos = data[offset++];
+        size_t retainedCount = 0, retainedBytes = 0;
+        for (const auto &entry : retainedMessages) {
+            if (topicMatches(requested, entry.first)) {
+                ++retainedCount;
+                retainedBytes += sizeof(OutgoingQoSMessage) + entry.first.length() + entry.second->length;
+            }
+        }
+        if (client->pendingMessages.size() + client->outgoingMessages.size() + reservedRetainedCount + retainedCount > MQTT_MAX_QUEUED_MESSAGES ||
+            storedBytes() + reservedRetainedBytes + retainedBytes + sizeof(Subscription) + requested.filter.length() > mqttStorageBudget()) {
+            suback[codeIndex++] = 0x80; continue;
+        }
         bool found = false;
         for (auto &existing : client->subscriptions)
         {
@@ -1324,12 +1176,21 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
                 break;
             }
         }
-        if (!found) client->subscriptions.push_back(requested);
+        if (!found) {
+            if (client->subscriptions.size() >= MQTT_MAX_SUBSCRIPTIONS ||
+                storedBytes() + sizeof(Subscription) + requested.filter.length() > mqttStorageBudget()) {
+                suback[codeIndex++] = 0x80; continue;
+            }
+            client->subscriptions.push_back(requested);
+        }
         suback[codeIndex++] = requested.qos;
-        if (subscribeCallback)
+        reservedRetainedCount += retainedCount;
+        reservedRetainedBytes += retainedBytes;
+        auto callback = subscribeCallback;
+        if (callback)
         {
             const String id = client->clientId;
-            subscribeCallback(id, requested.filter);
+            callback(id, requested.filter);
             if (!isClientActive(transport, client)) return;
         }
     }
@@ -1338,7 +1199,7 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
         closeMQTTClient(client);
         return;
     }
-    suback.reset(); // SUBACK-Speicher vor dem Retained-Paketbau freigeben.
+    codeIndex = 3 + encodedSize;
     // MQTT-3.8.4-3/-4: nur angefragte Filter, inklusive Wiederholungen,
     // jeweils mit ihrem QoS wie einzelne SUBSCRIBEs behandeln.
     offset = 2;
@@ -1348,128 +1209,53 @@ void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size
         size_t size = 0;
         readMQTTField(data, length, offset, bytes, size);
         Subscription requested;
-        requested.filter.concat((const char *)bytes, size);
+        requested.filter = mqttString(bytes, size);
         requested.qos = data[offset++];
-        sendRetainedMessages(client, requested);
+        if (suback[codeIndex++] != 0x80) sendRetainedMessages(client, requested);
         if (!isClientActive(transport, client)) return;
     }
 }
 
 void ESPAsyncMQTTBroker::handleUnsubscribe(MQTTClient *client, uint8_t *data, size_t length)
-
 {
-
     AsyncClient *transport = client->client;
-
-    if (length < 2 || (data[0] == 0 && data[1] == 0))
-    {
-        closeMQTTClient(client);
-        return;
-    }
-    size_t validationOffset = 2, count = 0;
-    while (validationOffset < length)
-    {
-        const uint8_t *bytes = nullptr;
-        size_t size = 0;
-        if (!readMQTTField(data, length, validationOffset, bytes, size) ||
-            size == 0 || size > MQTT_MAX_TOPIC_SIZE || !validMQTTUTF8(bytes, size))
-        {
-            closeMQTTClient(client);
-            return;
-        }
-        String filter;
-        filter.concat((const char *)bytes, size);
-        const bool valid = isValidTopicFilter(filter);
-        if (!isClientActive(transport, client)) return;
-        if (!valid)
-        {
-            closeMQTTClient(client);
-            return;
+    if (length < 2 || !(data[0] || data[1])) { closeMQTTClient(client); return; }
+    size_t offset = 2, count = 0;
+    while (offset < length) {
+        const uint8_t *bytes; size_t size;
+        if (!readMQTTField(data, length, offset, bytes, size) || !isValidTopicFilter(mqttString(bytes, size))) {
+            closeMQTTClient(client); return;
         }
         ++count;
     }
-    if (count == 0)
-    {
-        closeMQTTClient(client);
-        return;
-    }
-
-    uint16_t packetId = (data[0] << 8) | data[1];
-
-    uint8_t unsuback[4] = {0xB0, 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
-
-    client->client->write((const char *)unsuback, 4);
-
-    size_t index = 2;
-
-    while (index < length)
-
-    {
-
-        if (index + 2 > length)
-
-            break;
-
-        uint16_t topicLength = (data[index] << 8) | data[index + 1];
-
-        index += 2;
-
-        if (index + topicLength > length)
-
-            break;
-
-        if (topicLength > MQTT_MAX_TOPIC_SIZE)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Unsubscribe topic too long: %u > %u", topicLength, MQTT_MAX_TOPIC_SIZE);
-
-            break;
+    if (!count) { closeMQTTClient(client); return; }
+    offset = 2;
+    while (offset < length) {
+        const uint8_t *bytes; size_t size;
+        readMQTTField(data, length, offset, bytes, size);
+        const String filter = mqttString(bytes, size);
+        bool removed = false;
+        for (auto it = client->subscriptions.begin(); it != client->subscriptions.end();) {
+            if (it->filter == filter) { it = client->subscriptions.erase(it); removed = true; }
+            else ++it;
         }
-
-        char topicBuffer[MQTT_MAX_TOPIC_SIZE + 1] = {0};
-
-        memcpy(topicBuffer, data + index, topicLength);
-        topicBuffer[topicLength] = '\0';
-
-        String topic = String(topicBuffer);
-
-        index += topicLength;
-
-        for (auto it = client->subscriptions.begin(); it != client->subscriptions.end();)
-
-        {
-
-            if (it->filter == topic)
-
-            {
-
-                if (unsubscribeCallback)
-
-                {
-
-                    const String callbackClientId = client->clientId;
-                    unsubscribeCallback(callbackClientId, topic);
-                    if (!isClientActive(transport, client)) return;
-                }
-
-                it = client->subscriptions.erase(it);
-            }
-
-            else
-
-            {
-
-                ++it;
-            }
+        auto callback = unsubscribeCallback;
+        if (removed && callback) {
+            const String id = client->clientId;
+            callback(id, filter);
+            if (!isClientActive(transport, client)) return;
         }
     }
+    const uint8_t ack[] = {0xB0, 2, data[0], data[1]};
+    if (transport->write((const char*)ack, sizeof(ack)) != sizeof(ack)) closeMQTTClient(client);
 }
 
 void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
 {
     uint8_t pingresp[] = {0xD0, 0x00};
-    client->client->write((const char *)pingresp, 2);
+    if (client->client->write((const char *)pingresp, 2) != 2) {
+        closeMQTTClient(client); return;
+    }
     if (!client->kaSeen)
     {
         client->kaSeen = true;
@@ -1479,230 +1265,75 @@ void ESPAsyncMQTTBroker::handlePingReq(MQTTClient *client)
 }
 
 void ESPAsyncMQTTBroker::handleDisconnect(MQTTClient *client)
-
 {
-
-    logMessage(DEBUG_INFO, "Clean disconnect from client %s (DISCONNECT packet received).", client->clientId.c_str());
-
-    client->connected = false;
-
     client->gracefulDisconnect = true;
-
-    if (client->hasWill)
-
-    {
-
-        logMessage(DEBUG_DEBUG, "LWT for client %s is discarded (clean disconnect).", client->clientId.c_str());
-
-        client->hasWill = false;
-
-        client->willTopic = "";
-
-        client->willPayload.reset();
-
-        client->willPayloadLen = 0;
-    }
-
-    if (client->cleanSession && client->client)
-
-    {
-
-        closeMQTTClient(client);
-    }
+    client->hasWill = false;
+    client->willPayload.reset();
+    client->willPayloadLen = 0;
+    // Auch persistente Sessions müssen ihre Netzwerkverbindung schließen.
+    closeMQTTClient(client);
 }
 
 void ESPAsyncMQTTBroker::handlePuback(MQTTClient *client, uint8_t *data, size_t len)
-
 {
-
-    if (len < 2)
-
-    {
-
-        logMessage(DEBUG_ERROR, "Puback packet too short");
-
-        return;
-    }
-
-    uint16_t packetId = (data[0] << 8) | data[1];
-
-    auto it = client->outgoingMessages.find(packetId);
-
-    if (it != client->outgoingMessages.end())
-
-    {
-
-        if (it->second.qos == 1)
-
-        {
-
-            logMessage(DEBUG_DEBUG, "PUBACK from subscriber '%s' for packet ID %u received.", client->clientId.c_str(), packetId);
-
-            client->outgoingMessages.erase(it);
-        }
-
-        else
-
-        {
-
-            logMessage(DEBUG_WARNING, "Received PUBACK for QoS 2 message from '%s' (packet ID %u). This is unexpected.", client->clientId.c_str(), packetId);
-        }
-    }
-
-    else
-
-    {
-
-        logMessage(DEBUG_DEBUG, "Spurious PUBACK from '%s' for packet ID %u received.", client->clientId.c_str(), packetId);
-    }
+    if (len != 2) return;
+    const uint16_t id = (data[0] << 8) | data[1];
+    auto it = client->outgoingMessages.find(id);
+    if (it != client->outgoingMessages.end() && it->second.state == OutgoingQoSState::AwaitingPuback)
+        client->outgoingMessages.erase(it);
+    const auto active = clients.find(client->client);
+    if (active != clients.end()) pumpMessages(active->second);
 }
 
 void ESPAsyncMQTTBroker::handlePubRec(MQTTClient *client, uint8_t *data, size_t len)
-
 {
-
-    if (len < 2)
-
+    if (len != 2) return;
+    const uint16_t id = (data[0] << 8) | data[1];
+    auto it = client->outgoingMessages.find(id);
+    if (it != client->outgoingMessages.end())
     {
-
-        logMessage(DEBUG_ERROR, "PubRec packet too short");
-
-        return;
-    }
-
-    uint16_t packetId = (data[0] << 8) | data[1];
-
-    // Check if this is a PUBREC from a subscriber
-
-    auto it = client->outgoingMessages.find(packetId);
-
-    if (it != client->outgoingMessages.end() && it->second.state == OutgoingQoSState::AwaitingPubrec)
-
-    {
-
-        logMessage(DEBUG_DEBUG, "PUBREC from subscriber '%s' for packet ID %u received.", client->clientId.c_str(), packetId);
-
-        // Update state and send PUBREL
-
+        if (it->second.qos != 2) return;
         it->second.state = OutgoingQoSState::AwaitingPubcomp;
-
-        it->second.sentTime = millis();
-
-        uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(packetId >> 8), (uint8_t)(packetId & 0xFF)};
-
-        client->client->write((const char *)pubrel, sizeof(pubrel));
-
-        logMessage(DEBUG_DEBUG, "Sending PUBREL to subscriber '%s' for packet ID %u.", client->clientId.c_str(), packetId);
-
-        return;
+        sendMessage(client, it->second, false);
     }
-
-    // Original logic for PUBREC from a publisher
-
-    uint8_t pubrel[] = {0x62, 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
-
-    client->client->write((const char *)pubrel, sizeof(pubrel));
-
-    logMessage(DEBUG_DEBUG, "PUBREC for publisher packet ID %u processed", packetId);
+    else
+    {
+        uint8_t pubrel[] = {0x62, 2, static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id)};
+        if (client->client->write(reinterpret_cast<const char*>(pubrel), 4) != 4) closeMQTTClient(client);
+    }
 }
 
 void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t len)
-
 {
-
-    if (len < 2)
-
+    if (len != 2) return;
+    const uint16_t id = (data[0] << 8) | data[1];
+    auto it = client->incomingQoS2Messages.find(id);
+    IncomingQoS2Message message;
+    const bool deliver = it != client->incomingQoS2Messages.end();
+    if (deliver)
     {
-
-        logMessage(DEBUG_ERROR, "PubRel packet too short");
-
-        return;
-    }
-
-    uint16_t packetId = (data[0] << 8) | data[1];
-
-    auto it = client->incomingQoS2Messages.find(packetId);
-
-    if (it != client->incomingQoS2Messages.end())
-
-    {
-
-        IncomingQoS2Message &msg = it->second;
-
-        String payloadStr;
-
-        if (msg.payload_len > 0 && msg.payload)
-
-        {
-
-            // BP3-02: VLA durch Heap-Allokation ersetzt (VLA ist kein Standard-C++)
-            std::unique_ptr<char[]> tempPayload(new char[msg.payload_len + 1]);
-            memcpy(tempPayload.get(), msg.payload.get(), msg.payload_len);
-            tempPayload[msg.payload_len] = '\0';
-            payloadStr = String(tempPayload.get());
-        }
-
-        else
-
-        {
-
-            payloadStr = "";
-        }
-
-        logMessage(DEBUG_INFO, "PUBREL for packet ID %u received. Publishing QoS 2 message: Topic='%s'", packetId, msg.topic.c_str());
-
-        publish(msg.topic.c_str(), payloadStr.c_str(), msg.retained, MQTT_QOS2);
-
+        if (!publishMessage(it->second.topic.c_str(), it->second.payload.get(), it->second.payload_len,
+                            it->second.retained, 2, "", false))
+        { closeMQTTClient(client); return; } // Eingangs-State bleibt in persistenter Session.
+        message = std::move(it->second);
         client->incomingQoS2Messages.erase(it);
     }
-
-    else
-
-    {
-
-        logMessage(DEBUG_WARNING, "PUBREL for unknown packet ID %u received.", packetId);
-    }
-
-    uint8_t pubcomp[] = {(MQTT_PUBCOMP << 4), 0x02, (uint8_t)(packetId >> 8), (uint8_t)packetId};
-
-    client->client->write((const char *)pubcomp, sizeof(pubcomp));
-
-    logMessage(DEBUG_DEBUG, "PUBCOMP for packet ID %u sent.", packetId);
+    AsyncClient *transport = client->client;
+    uint8_t pubcomp[] = {0x70, 2, static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id)};
+    if (transport->write(reinterpret_cast<const char*>(pubcomp), 4) != 4 && isClientActive(transport, client)) closeMQTTClient(client);
+    flushMessages();
+    if (deliver) notifyMessage(message.senderClientId, message.topic, message.payload.get(), message.payload_len);
 }
 
 void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *client, uint8_t *data, size_t len)
-
 {
-
-    if (len < 2)
-
-    {
-
-        logMessage(DEBUG_ERROR, "PubComp packet too short");
-
-        return;
-    }
-
-    uint16_t packetId = (data[0] << 8) | data[1];
-
-    // Check if this is a PUBCOMP from a subscriber
-
-    auto it = client->outgoingMessages.find(packetId);
-
+    if (len != 2) return;
+    const uint16_t id = (data[0] << 8) | data[1];
+    auto it = client->outgoingMessages.find(id);
     if (it != client->outgoingMessages.end() && it->second.state == OutgoingQoSState::AwaitingPubcomp)
-
-    {
-
-        logMessage(DEBUG_DEBUG, "PUBCOMP from subscriber '%s' for packet ID %u received. QoS 2 flow complete.", client->clientId.c_str(), packetId);
-
         client->outgoingMessages.erase(it);
-
-        return;
-    }
-
-    // Original logic for PUBCOMP from a publisher
-
-    logMessage(DEBUG_DEBUG, "PUBCOMP for publisher packet ID %u received", packetId);
+    const auto active = clients.find(client->client);
+    if (active != clients.end()) pumpMessages(active->second);
 }
 
 bool ESPAsyncMQTTBroker::topicMatches(const Subscription &subscription, const String &topic)
@@ -1734,132 +1365,31 @@ bool ESPAsyncMQTTBroker::topicMatches(const String &filter, const String &topic)
 }
 
 void ESPAsyncMQTTBroker::sendRetainedMessages(MQTTClient *client, const Subscription &sub)
-
 {
-
-    AsyncClient *transport = client->client;
-    for (auto const &entry : retainedMessages)
-
-    {
-
-        auto const &msg = entry.second;
-
-        if (!msg)
-
-        {
-
-            logMessage(DEBUG_ERROR, "Error: Invalid unique_ptr in retainedMessages Map found.");
-
-            continue;
+    // Retained-Daten zuerst in die Session kopieren; Transport-Callbacks erst danach ausfuehren.
+    auto active = clients.find(client->client);
+    if (active == clients.end()) return;
+    auto held = active->second;
+    for (const auto &entry : retainedMessages) {
+        const auto &retained = *entry.second;
+        if (!topicMatches(sub, retained.topic)) continue;
+        if (client->pendingMessages.size() + client->outgoingMessages.size() >= MQTT_MAX_QUEUED_MESSAGES ||
+            storedBytes() + sizeof(OutgoingQoSMessage) + retained.topic.length() + retained.length > mqttStorageBudget()) {
+            closeMQTTClient(client); return;
         }
-
-        if (topicMatches(sub, msg->topic))
-
-        {
-
-            size_t topicLength = msg->topic.length();
-
-            if (topicLength > MQTT_MAX_TOPIC_SIZE)
-
-            {
-
-                logMessage(DEBUG_ERROR, "Retained Topic too long: %u > %u", (unsigned)topicLength, MQTT_MAX_TOPIC_SIZE);
-
-                continue;
-            }
-
-            size_t actualPayloadLength = msg->length;
-
-            if (msg->length > MQTT_MAX_PAYLOAD_SIZE)
-
-            {
-
-                logMessage(DEBUG_WARNING, "Retained Payload for Topic '%s' will be truncated: %u > %u", msg->topic.c_str(), (unsigned)msg->length, MQTT_MAX_PAYLOAD_SIZE);
-
-                actualPayloadLength = MQTT_MAX_PAYLOAD_SIZE;
-            }
-
-            // MQTT: Zustellung maximal mit dem QoS der Subscription.
-            uint8_t final_qos = (msg->qos < sub.qos) ? msg->qos : sub.qos;
-            size_t packet_id_len = (final_qos > 0) ? 2 : 0;
-            size_t remainingLengthField = 2 + topicLength + packet_id_len + actualPayloadLength;
-
-            // BP2-02: Variable-Length-Encoding statt 1-Byte-Limit
-            size_t header_len = 1 + mqttRemainingLengthBytes(remainingLengthField);
-
-            size_t totalPacketLength = header_len + remainingLengthField;
-
-            if (totalPacketLength > MQTT_MAX_PACKET_SIZE)
-
-            {
-
-                logMessage(DEBUG_ERROR, "Retained Message (Topic: %s) exceeds MQTT_MAX_PACKET_SIZE: %u > %u.", msg->topic.c_str(), (unsigned)totalPacketLength, MQTT_MAX_PACKET_SIZE);
-
-                continue;
-            }
-
-            std::unique_ptr<uint8_t[]> packet(new uint8_t[totalPacketLength]);
-
-            uint8_t *ptr = packet.get();
-            *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1) | 0x01;
-
-            // Variable-Length-Encoding
-            size_t rem_len = remainingLengthField;
-            do
-            {
-                uint8_t byte = rem_len % 128;
-                rem_len /= 128;
-                if (rem_len > 0)
-                    byte |= 128;
-                *ptr++ = byte;
-            } while (rem_len > 0);
-
-            *ptr++ = topicLength >> 8;
-            *ptr++ = topicLength & 0xFF;
-
-            memcpy(ptr, msg->topic.c_str(), topicLength);
-            ptr += topicLength;
-
-            if (final_qos > 0)
-            {
-                uint16_t packetId = getNextPacketId();
-                *ptr++ = packetId >> 8;
-                *ptr++ = packetId & 0xFF;
-
-                OutgoingQoSMessage outMsg;
-                outMsg.qos = final_qos;
-                outMsg.retain = true;
-                outMsg.topic = msg->topic;
-                outMsg.payloadLen = actualPayloadLength;
-
-                if (actualPayloadLength > 0 && msg->payload)
-                {
-                    outMsg.payload = std::unique_ptr<uint8_t[]>(new uint8_t[actualPayloadLength]);
-                    memcpy(outMsg.payload.get(), msg->payload.get(), actualPayloadLength);
-                }
-
-                outMsg.sentTime = millis();
-                outMsg.retryCount = 0;
-                outMsg.packetId = packetId;
-                outMsg.state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
-
-                client->outgoingMessages[packetId] = std::move(outMsg);
-            }
-
-            if (actualPayloadLength > 0 && msg->payload)
-
-            {
-
-                memcpy(ptr, msg->payload.get(), actualPayloadLength);
-            }
-
-            client->client->write((const char *)packet.get(), totalPacketLength);
-
-            logMessage(DEBUG_DEBUG, "Retained Message sent: Topic='%s', Payload-length=%u, QoS=%d", msg->topic.c_str(), (unsigned)actualPayloadLength, final_qos);
-
-            if (!isClientActive(transport, client)) return;
+        OutgoingQoSMessage message;
+        message.topic = retained.topic; message.payloadLen = retained.length;
+        message.qos = std::min(sub.qos, retained.qos); message.retain = true;
+        message.state = message.qos == 2 ? OutgoingQoSState::AwaitingPubrec : OutgoingQoSState::AwaitingPuback;
+        if (message.payloadLen) {
+            message.payload.reset(new (std::nothrow) uint8_t[message.payloadLen]);
+            if (!message.payload) { closeMQTTClient(client); return; }
+            memcpy(message.payload.get(), retained.payload.get(), message.payloadLen);
         }
+        message.sequence = nextSequence++;
+        client->pendingMessages.push_back(std::move(message));
     }
+    pumpMessages(held);
 }
 
 
@@ -1922,8 +1452,7 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
     }
 
     // USER+PASS
-    String p = password;
-    p.trim();
+    const String &p = password;
 
     if (p.isEmpty())
     {
@@ -1944,7 +1473,7 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
         return false;
     }
 
-    bool passOk = (p == brokerConfig.password);
+    bool passOk = memcmp(p.c_str(), brokerConfig.password.c_str(), p.length()) == 0;
     if (!passOk)
     {
         if (brokerConfig.log)
@@ -1964,6 +1493,7 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
 bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)
 
 {
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
 
     if (newPort == 0)
 
@@ -1991,46 +1521,10 @@ bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)
 }
 
 bool ESPAsyncMQTTBroker::isValidPublishTopic(const String &topic)
-
 {
-
-    if (topic.isEmpty())
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic is empty.");
-
-        return false;
-    }
-
-    if (topic.length() > MQTT_MAX_TOPIC_SIZE)
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' exceeds max length of %d.", topic.c_str(), MQTT_MAX_TOPIC_SIZE);
-
-        return false;
-    }
-
-    if (topic.indexOf('#') != -1)
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' contains multi-level wildcard '#'.", topic.c_str());
-
-        return false;
-    }
-
-    if (topic.indexOf('+') != -1)
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid publish topic: Topic '%s' contains single-level wildcard '+'.", topic.c_str());
-
-        return false;
-    }
-
-    return true;
+    if (topic.isEmpty() || topic.length() > MQTT_MAX_TOPIC_SIZE ||
+        !validMQTTUTF8((const uint8_t*)topic.c_str(), topic.length())) return false;
+    return topic.indexOf('#') < 0 && topic.indexOf('+') < 0;
 }
 
 bool ESPAsyncMQTTBroker::publish(const char *topic, const char *payload, bool retained, uint8_t qos)
@@ -2073,343 +1567,87 @@ bool ESPAsyncMQTTBroker::publish(const char *topic, uint8_t qos, bool retained, 
 }
 
 bool ESPAsyncMQTTBroker::publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId)
-
 {
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    return publishMessage(topic, payload, payloadLen, retained, qos, excludeClientId, true);
+}
 
-    if (!topic)
-
-    {
-
-        logMessage(DEBUG_ERROR, "Null pointer as topic for Publish");
-
-        return false;
+bool ESPAsyncMQTTBroker::publishMessage(const char *topic, const uint8_t *payload, size_t payloadLen,
+                                      bool retained, uint8_t qos, const String &excludeClientId, bool dispatch)
+{
+    if (!topic || qos > 2 || (payloadLen && !payload) || payloadLen > MQTT_MAX_PACKET_SIZE) return false;
+    const String name(topic);
+    if (!isValidPublishTopic(name)) return false;
+    const size_t remaining = 2 + name.length() + (qos ? 2 : 0) + payloadLen;
+    if (1 + mqttRemainingLengthBytes(remaining) + remaining > MQTT_MAX_PACKET_SIZE) return false;
+    struct Target { std::shared_ptr<MQTTClient> client; uint8_t qos; };
+    std::array<Target, MQTT_MAX_CLIENTS + MQTT_MAX_SESSIONS> targets;
+    size_t count = 0, additional = 0;
+    auto collect = [&](const std::shared_ptr<MQTTClient>& client, bool offline) {
+        if (client->clientId == excludeClientId || (offline && !qos)) return true;
+        if (!offline && (!client->connected || client->closing)) return true;
+        int best = -1;
+        for (const auto &subscription : client->subscriptions)
+            if (topicMatches(subscription, name)) best = std::max(best, (int)subscription.qos);
+        if (best < 0) return true;
+        if (count == targets.size() || client->pendingMessages.size() + client->outgoingMessages.size() >= MQTT_MAX_QUEUED_MESSAGES) return false;
+        targets[count++] = {client, (uint8_t)std::min(best, (int)qos)};
+        additional += sizeof(OutgoingQoSMessage) + name.length() + payloadLen;
+        return true;
+    };
+    for (const auto &entry : clients) if (!collect(entry.second, false)) return false;
+    for (const auto &entry : persistentSessions) if (!collect(entry.second, true)) return false;
+    const auto oldRetained = retainedMessages.find(name);
+    size_t bytes = storedBytes();
+    if (retained && oldRetained != retainedMessages.end())
+        bytes -= sizeof(RetainedMessage) + oldRetained->second->topic.length() + oldRetained->second->length;
+    if (retained && payloadLen) {
+        if (oldRetained == retainedMessages.end() && retainedMessages.size() >= MQTT_MAX_RETAINED_MESSAGES) return false;
+        additional += sizeof(RetainedMessage) + name.length() + payloadLen;
     }
-
-    if (payloadLen > 0 && !payload)
-
-    {
-
-        logMessage(DEBUG_ERROR, "Null pointer as payload with payloadLen > 0 for Publish");
-
-        return false;
-    }
-
-    size_t topicLen = strlen(topic);
-
-    if (topicLen > MQTT_MAX_TOPIC_SIZE)
-
-    {
-
-        logMessage(DEBUG_ERROR, "Topic too long: %u > %u", (unsigned)topicLen, MQTT_MAX_TOPIC_SIZE);
-
-        return false;
-    }
-
-    if (payloadLen > MQTT_MAX_PAYLOAD_SIZE)
-
-    {
-
-        logMessage(DEBUG_WARNING, "Payload exceeds packet limit: %u > %u", (unsigned)payloadLen, MQTT_MAX_PAYLOAD_SIZE);
-        return false;
-    }
-
-    // Kein separates 768-Byte-Limit: ein vollstaendiges PUBLISH muss passen.
-    // Vor Retained-Speicherung oder QoS-State pruefen, niemals still kuerzen.
-    const size_t bodySize = 2 + topicLen + (qos > 0 ? 2 : 0) + payloadLen;
-    const size_t wireSize = bodySize + 1 + mqttRemainingLengthBytes(bodySize);
-    if (qos > MQTT_QOS2 || wireSize > MQTT_MAX_PACKET_SIZE)
-        return false;
-
-    logMessage(DEBUG_INFO, "📤 Broker is publishing on topic '%s' (Length: %u, QoS: %d, Retained: %s)", topic, (unsigned)payloadLen, qos, retained ? "Yes" : "No");
-
-    if (!excludeClientId.isEmpty())
-
-    {
-
-        logMessage(DEBUG_INFO, "   - Excluded client: %s", excludeClientId.c_str());
-    }
-
-    String topicStr = String(topic);
-
-    if (retained)
-
-    {
-
-        retainedMessages.erase(topicStr);
-
-        if (payloadLen > 0)
-
-        {
-
-            auto msg = std::make_unique<RetainedMessage>(topicStr, payload, payloadLen, qos);
-
-            retainedMessages[topicStr] = std::move(msg);
+    const size_t budget = mqttStorageBudget();
+    if (bytes > budget || additional > budget - bytes) return false;
+    // Erst alle Nutzdaten bereitstellen, dann gemeinsam committen; kein Teilversand bei Limitfehlern.
+    std::vector<OutgoingQoSMessage> staged;
+    staged.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        OutgoingQoSMessage message;
+        message.topic = name; message.qos = targets[i].qos;
+        message.payloadLen = payloadLen;
+        message.state = message.qos == 2 ? OutgoingQoSState::AwaitingPubrec : OutgoingQoSState::AwaitingPuback;
+        if (payloadLen) {
+            message.payload.reset(new (std::nothrow) uint8_t[payloadLen]);
+            if (!message.payload) return false;
+            memcpy(message.payload.get(), payload, payloadLen);
         }
+        staged.push_back(std::move(message));
     }
-
-    bool messageSent = false;
-
-    int clientCount = 0;
-
-    int sentCount = 0;
-
-    for (auto &clientEntry : clients)
-
-    {
-
-        auto &c = clientEntry.second;
-
-        if (!c->connected)
-
-            continue;
-
-        clientCount++;
-
-        if (!excludeClientId.isEmpty() && c->clientId == excludeClientId)
-        {
-            logMessage(DEBUG_DEBUG, "  - Client %s (Original Publisher) will be skipped", c->clientId.c_str());
-            continue;
-        }
-
-        bool matched = false;
-        uint8_t maxQos = 0;
-        for (const auto &sub : c->subscriptions)
-        {
-            if (topicMatches(sub, topicStr))
-            {
-                matched = true;
-                if (sub.qos > maxQos) maxQos = sub.qos;
-                if (maxQos >= qos) break;
-            }
-        }
-        if (matched)
-        {
-            // MQTT-3.3.5-1: Maximum aller passenden Subscriptions.
-            uint8_t final_qos = qos < maxQos ? qos : maxQos;
-
-            size_t packet_id_len = (final_qos > 0) ? 2 : 0;
-
-            size_t remainingLength = 2 + topicLen + packet_id_len + payloadLen;
-
-            // Basic check for remaining length encoding
-
-            if (remainingLength > 2097151)
-
-            { // Max for 3 bytes
-
-                logMessage(DEBUG_ERROR, "Message too large to encode. Topic: %s", topicStr.c_str());
-
-                continue; // Skip this client
-            }
-
-            size_t header_len = 1 + mqttRemainingLengthBytes(remainingLength);
-
-            size_t packetSize = header_len + remainingLength;
-
-            auto packet = std::unique_ptr<uint8_t[]>(new uint8_t[packetSize]);
-
-            uint8_t *ptr = packet.get();
-
-            *ptr++ = (MQTT_PUBLISH << 4) | (final_qos << 1);
-
-            // Encode remaining length
-
-            size_t rem_len = remainingLength;
-
-            do
-
-            {
-
-                uint8_t byte = rem_len % 128;
-
-                rem_len /= 128;
-
-                if (rem_len > 0)
-
-                {
-
-                    byte |= 128;
-                }
-
-                *ptr++ = byte;
-
-            } while (rem_len > 0);
-
-            *ptr++ = topicLen >> 8;
-
-            *ptr++ = topicLen & 0xFF;
-
-            memcpy(ptr, topicStr.c_str(), topicLen);
-
-            ptr += topicLen;
-
-            if (final_qos > 0)
-
-            {
-
-                uint16_t packetId = getNextPacketId();
-
-                *ptr++ = packetId >> 8;
-
-                *ptr++ = packetId & 0xFF;
-
-                OutgoingQoSMessage outMsg;
-
-                outMsg.qos = final_qos;
-
-                outMsg.retain = false;
-
-                outMsg.topic = topicStr;
-
-                outMsg.payloadLen = payloadLen;
-
-                if (payloadLen > 0)
-
-                {
-
-                    outMsg.payload = std::unique_ptr<uint8_t[]>(new uint8_t[payloadLen]);
-
-                    memcpy(outMsg.payload.get(), payload, payloadLen);
-                }
-
-                outMsg.sentTime = millis();
-
-                outMsg.retryCount = 0;
-
-                outMsg.packetId = packetId;
-
-                outMsg.state = (final_qos == 1) ? OutgoingQoSState::AwaitingPuback : OutgoingQoSState::AwaitingPubrec;
-
-                c->outgoingMessages[packetId] = std::move(outMsg);
-
-                logMessage(DEBUG_DEBUG, "Storing outgoing QoS %d message for client '%s' (packet ID %u)", final_qos, c->clientId.c_str(), packetId);
-            }
-
-            if (payloadLen > 0)
-
-            {
-
-                memcpy(ptr, payload, payloadLen);
-            }
-
-            bool writeSuccess = c->client->write((const char *)packet.get(), packetSize);
-
-            if (writeSuccess)
-
-            {
-
-                sentCount++;
-
-                messageSent = true;
-            }
-
-            logMessage(DEBUG_DEBUG, "  - Sent PUBLISH to %s (QoS %d), Success: %s", c->clientId.c_str(), final_qos, writeSuccess ? "Yes" : "No");
-
-        }
+    std::unique_ptr<RetainedMessage> saved;
+    if (retained && payloadLen) {
+        saved.reset(new (std::nothrow) RetainedMessage(name, payload, payloadLen, qos));
+        if (!saved || !saved->payload) return false;
     }
-
-    logMessage(DEBUG_INFO, "📊 Message sent to %d of %d connected clients", sentCount, clientCount);
-
-    return messageSent;
+    for (size_t i = 0; i < count; ++i) {
+        staged[i].sequence = nextSequence++;
+        targets[i].client->pendingMessages.push_back(std::move(staged[i]));
+    }
+    if (retained) {
+        if (payloadLen) retainedMessages[name] = std::move(saved);
+        else if (oldRetained != retainedMessages.end()) retainedMessages.erase(oldRetained);
+    }
+    if (dispatch) flushMessages();
+    return true;
 }
 
 
 bool ESPAsyncMQTTBroker::isValidTopicFilter(const String &filter)
-
 {
-
-    if (filter.isEmpty())
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid topic filter: Filter is empty.");
-
-        return false;
+    const size_t length = filter.length();
+    if (!length || length > MQTT_MAX_TOPIC_SIZE || !validMQTTUTF8((const uint8_t*)filter.c_str(), length)) return false;
+    const char *bytes = filter.c_str();
+    for (size_t i = 0; i < length; ++i) {
+        if (bytes[i] == '#' && ((i && bytes[i-1] != '/') || i+1 != length)) return false;
+        if (bytes[i] == '+' && ((i && bytes[i-1] != '/') || (i+1 < length && bytes[i+1] != '/'))) return false;
     }
-
-    if (filter.length() > 65535)
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid topic filter: Filter exceeds 65535 bytes.");
-
-        return false;
-    }
-
-    std::vector<String> levels;
-
-    int start = 0;
-
-    int pos;
-
-    while ((pos = filter.indexOf('/', start)) != -1)
-
-    {
-
-        levels.push_back(filter.substring(start, pos));
-
-        start = pos + 1;
-    }
-
-    levels.push_back(filter.substring(start));
-
-    if (levels.empty() && !filter.isEmpty())
-
-    {
-    }
-
-    else if (levels.empty() && filter.length() > 0)
-
-    {
-
-        logMessage(DEBUG_WARNING, "Invalid topic filter: Could not split levels for non-empty filter '%s'.", filter.c_str());
-
-        return false;
-    }
-
-    for (size_t i = 0; i < levels.size(); ++i)
-
-    {
-
-        const String &level = levels[i];
-
-        if (level.indexOf('#') != -1)
-
-        {
-
-            if (level.length() > 1)
-
-            {
-
-                logMessage(DEBUG_WARNING, "Invalid topic filter: '#' cannot be part of a level (Level: '%s', Filter: '%s').", level.c_str(), filter.c_str());
-
-                return false;
-            }
-
-            if (i != levels.size() - 1)
-
-            {
-
-                logMessage(DEBUG_WARNING, "Invalid topic filter: '#' must be the last level (Filter: '%s').", filter.c_str());
-
-                return false;
-            }
-        }
-
-        else if (level.indexOf('+') != -1)
-
-        {
-
-            if (level.length() > 1)
-
-            {
-
-                logMessage(DEBUG_WARNING, "Invalid topic filter: '+' cannot be part of a level (Level: '%s', Filter: '%s').", level.c_str(), filter.c_str());
-
-                return false;
-            }
-        }
-    }
-
     return true;
 }

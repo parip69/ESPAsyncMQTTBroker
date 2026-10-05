@@ -16,12 +16,90 @@ Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 
 ## Aktueller Implementierungsstand
 
-Stand: **2.0.223**. MQTT **3.1.1** ist der aktive unterstützte Protokollstand.
-MQTT **5 wird nicht unterstützt**. Die Bibliothek beansprucht weiterhin keine
-vollständige MQTT-3.1.1-Konformität.
+Stand: **2.0.224**. MQTT **3.1.1** ist der aktive unterstützte Protokollstand.
+MQTT **5 wird nicht unterstützt**. Die MQTT-3.1.1-Arbeiten aus Paket 1 und 2
+sind umgesetzt; eine unabhängige Konformitätszertifizierung liegt nicht vor.
 
 Der bisherige Stand bleibt unter Tag `v2.0.222` erhalten.
-Offene MQTT-3.1.1-Arbeiten stehen in [TODO.md](TODO.md).
+Abgeschlossene Pakete und weitere Aufgaben stehen in [TODO.md](TODO.md).
+
+### Binärdaten, Sessions und QoS in 2.0.224
+
+- Binärpayloads bleiben einschließlich Nullbytes bei Live-Zustellung,
+  Retained, Last Will und QoS-Wiederholungen unverändert.
+- Alle vorgeschriebenen MQTT-Textfelder werden auf gültiges UTF-8 geprüft.
+  Das Passwort ist ein unverändertes Binärfeld; Leerzeichen werden nicht entfernt.
+- `CleanSession=0` erhält die Session einschließlich Subscriptions,
+  Offline-Nachrichten und beider QoS-2-Richtungen. `CleanSession=1` löscht den
+  vorherigen Zustand. Auch eine leere Session setzt bei Wiederaufnahme
+  `Session Present=1`. DISCONNECT schließt die TCP-Verbindung.
+- Offline werden passende Publish-QoS-1/2-Nachrichten gespeichert, auch
+  bei Subscription-QoS 0. Offline-Publish-QoS 0 wird nicht gespeichert.
+- Unbestätigte QoS-Nachrichten behalten ihre Identifier. Wiederaufnahme
+  sendet PUBLISH mit DUP beziehungsweise PUBREL im vorhandenen Zustand.
+  PUBREL-Wiederholungen lösen keine doppelte QoS-2-Anwendungszustellung aus.
+- Zustandszugriffe aus AsyncTCP, `loop()` und öffentlichen Methoden sind
+  synchronisiert. Große Empfangspuffer werden nach Verarbeitung freigegeben.
+
+Sessions, Offline-Queues und Retained-Daten liegen im **RAM**. Sie überleben
+TCP-Verbindungsabbrüche, jedoch keinen ESP32-Neustart oder Stromausfall.
+Ein `stop()`/`begin()` am selben Broker-Objekt erhält persistente Sessions
+und Retained-Daten; die Zerstörung des Objekts löscht sie.
+
+#### Binär-API und bestehende Callbacks
+
+```cpp
+const uint8_t data[] = {0x41, 0x00, 0xFF};
+bool accepted = broker.publish("device/binary", data, sizeof(data), false, 1);
+broker.onBinaryMessage([](const String& clientId, const String& topic,
+                         const uint8_t* payload, size_t length) {
+    // payload mit length auswerten; der Zeiger gilt nur waehrend dieses Aufrufs.
+});
+```
+
+Die Textüberladungen und `onMessage(clientId, topic, String)` bleiben verfügbar.
+Der String behält die Payload-Länge einschließlich Nullbytes. `c_str()` als
+C-String endet am ersten Nullbyte; für Binärdaten den neuen Callback oder
+`length()` mit längenbewusster Verarbeitung verwenden. Bei QoS 2 werden
+Nachrichten-Callbacks erst nach PUBREL einmal aufgerufen.
+
+`publish()` liefert `true`, wenn der Broker die Nachricht übernommen hat,
+auch ohne passende Empfänger. Das ist keine Empfangsbestätigung des Geräts.
+Bei ungültigen Parametern oder Ressourcenmangel liefert die Methode `false`.
+`getConnectedClientsInfo()` liefert eine synchronisierte **Kopie** der Map.
+Callbacks sollten kurz bleiben und keine Arbeit eines anderen Tasks abwarten,
+der seinerseits Broker-Methoden aufrufen muss.
+
+#### Konfigurierbare ESP32-Grenzen
+
+Diese Makros können als Build-Flags überschrieben werden:
+
+| Makro | Standardwert |
+| --- | ---: |
+| `MQTT_MAX_PACKET_SIZE` | 4096 Byte Gesamtpaket |
+| `MQTT_MAX_TOPIC_SIZE` | 256 Byte Topic/Filter |
+| `MQTT_MAX_CLIENTS` | 16 TCP-Verbindungen |
+| `MQTT_MAX_SESSIONS` | 16 persistente Sessions, verbunden und offline zusammen |
+| `MQTT_MAX_SUBSCRIPTIONS` | 64 je Session |
+| `MQTT_MAX_QUEUED_MESSAGES` | 32 ausgehende Nachrichten je Session; separat 32 eingehende QoS-2-Zustände |
+| `MQTT_MAX_INFLIGHT_MESSAGES` | 16 ausgehende QoS-1/2-Nachrichten je Session |
+| `MQTT_MAX_RETAINED_MESSAGES` | 64 Topics |
+| `MQTT_MAX_STORED_BYTES` | 65536 Byte Zustandsbudget |
+| `MQTT_RX_RESERVE_BYTES` | 8192 Byte Reserve innerhalb dieses Budgets |
+
+Client-Identifier sind auf 255 Byte begrenzt. Das Zustandsbudget zählt
+Payloads, Strings, Empfangspufferkapazität und geschätzte Strukturgrößen;
+Allocator-, TCP-/Framework-Speicher und vorübergehende Paketkopien benötigen
+zusätzlichen Heap. Grenzen passend zum verfügbaren RAM konfigurieren.
+
+Volle Queues verdrängen keine bereits angenommenen QoS-Nachrichten.
+Neue Veröffentlichungen werden vor Teilzustellung oder Retained-Änderungen
+abgewiesen. Bei Netzwerk-PUBLISH wird eine nicht übernommene Nachricht
+nicht positiv bestätigt und die Verbindung geschlossen. Bereits per PUBREC
+angenommener QoS-2-Zustand bleibt in persistenten Sessions zur Fortsetzung
+erhalten. Nicht erfüllbare Subscriptions erhalten SUBACK `0x80`;
+fehlende Session-Kapazität wird mit CONNACK `0x03` abgewiesen.
+Die Empfangsreserve lässt Platz für ACKs und Wiederverbindungen.
 
 ### Paket- und Zustellungskorrekturen in 2.0.223
 
@@ -75,14 +153,8 @@ Normative Grundlage: [OASIS MQTT 3.1.1 einschließlich Approved Errata 01](https
 - Bestehende JSON-/Text-Payload-Verarbeitung und Weiterleitung leerer Payloads
 - Optionales Ausschließen eines Clients beim Broker-Publish über `excludeClientId`
 
-### Bewusst offene Einschränkungen
-
-- Vollständige Binärpayload-Weiterleitung sowie globale UTF-8-Prüfung aller Paketarten
-- Vollständige persistente Sessions, Offline-QoS-Queue und QoS-2-Wiederaufnahme
-- Ressourcenlimits, erschöpfte Packet-Identifier und allgemeine Task-Synchronisierung
-
-`ignoreLoopDeliver` bleibt ohne Laufzeitwirkung. `excludeClientId`, Topics,
-JSON-Format und öffentliche Callback-Schnittstellen bleiben erhalten.
+`ignoreLoopDeliver` bleibt ohne Laufzeitwirkung. MQTT 5 und `noLocal`
+sind keine Funktionen dieses MQTT-3.1.1-Brokers.
 
 ## Installation
 
@@ -93,7 +165,7 @@ JSON-Format und öffentliche Callback-Schnittstellen bleiben erhalten.
 ### PlatformIO
 ```ini
 lib_deps =
-    me-no-dev/AsyncTCP
+    ESP32Async/AsyncTCP
     https://github.com/parip69/ESPAsyncMQTTBroker.git
 ```
 

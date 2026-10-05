@@ -1,5 +1,5 @@
 // ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️️
-// @ 2.0.223
+// @ 2.0.224
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 
@@ -9,6 +9,11 @@
 #include <map>
 #include <memory>
 #include <functional>
+#include <deque>
+#include <array>
+#include <mutex>
+#include <atomic>
+#include <new>
 #include "esp_timer.h"
 
 #define MQTT_CONNECT 1
@@ -42,6 +47,33 @@
 #endif
 // Payload nutzt den vorhandenen Paketrahmen; Topic/Header zaehlen mit.
 #define MQTT_MAX_PAYLOAD_SIZE MQTT_MAX_PACKET_SIZE
+
+// Speichergrenzen sind konfigurierbar; angenommene QoS-Nachrichten nie verwerfen.
+#ifndef MQTT_MAX_CLIENTS
+#define MQTT_MAX_CLIENTS 16
+#endif
+#ifndef MQTT_MAX_SESSIONS
+#define MQTT_MAX_SESSIONS 16
+#endif
+#ifndef MQTT_MAX_SUBSCRIPTIONS
+#define MQTT_MAX_SUBSCRIPTIONS 64
+#endif
+#ifndef MQTT_MAX_QUEUED_MESSAGES
+#define MQTT_MAX_QUEUED_MESSAGES 32
+#endif
+#ifndef MQTT_MAX_INFLIGHT_MESSAGES
+#define MQTT_MAX_INFLIGHT_MESSAGES 16
+#endif
+#ifndef MQTT_MAX_STORED_BYTES
+#define MQTT_MAX_STORED_BYTES 65536
+#endif
+#ifndef MQTT_MAX_RETAINED_MESSAGES
+#define MQTT_MAX_RETAINED_MESSAGES 64
+#endif
+// Reserve fuer Empfang, CONNECT und ACKs: volle Queues muessen drainierbar bleiben.
+#ifndef MQTT_RX_RESERVE_BYTES
+#define MQTT_RX_RESERVE_BYTES (2U * MQTT_MAX_PACKET_SIZE)
+#endif
 
 // Eigene Implementation von std::make_unique (ab C++14 Standard)
 #if __cplusplus < 201402L
@@ -94,6 +126,7 @@ struct IncomingQoS2Message;
 struct MQTTClient
 {
     AsyncClient *client = nullptr;
+    bool ownsTransport = false;
     String clientId;
     bool connected = false;
     bool closing = false;     ///< Nach Close keine weitere Paketverarbeitung
@@ -103,6 +136,7 @@ struct MQTTClient
     bool cleanSession = true;
     std::vector<Subscription> subscriptions;
     std::vector<uint8_t> rxBuffer;
+    bool processingRx = false; ///< Reentranten Empfang erst nach dem laufenden Paket bearbeiten.
     uint8_t protocolVersion = MQTT_PROTOCOL_LEVEL;
     bool hasWill = false;
     bool gracefulDisconnect = false;
@@ -115,6 +149,8 @@ struct MQTTClient
 
     // For QoS 1/2 messages sent *to* this client
     std::map<uint16_t, struct OutgoingQoSMessage> outgoingMessages;
+    std::deque<struct OutgoingQoSMessage> pendingMessages;
+    uint16_t nextPacketId = 1;
 
     // QoS2-Eingangs-State pro Client statt global,
     // weil packetId nur pro Verbindung eindeutig ist.
@@ -148,6 +184,8 @@ struct OutgoingQoSMessage
     uint8_t retryCount;
     OutgoingQoSState state;
     uint16_t packetId;
+    uint64_t sequence = 0;
+    bool transmitted = false;
 
     OutgoingQoSMessage() : qos(0), retain(false), payloadLen(0), sentTime(0), retryCount(0), state(OutgoingQoSState::AwaitingPuback), packetId(0) {}
 };
@@ -167,15 +205,10 @@ struct RetainedMessage
     {
         if (len > 0 && p != nullptr)
         {
-            payload.reset(new uint8_t[len]);
-            if (len <= MQTT_MAX_PAYLOAD_SIZE)
+            payload.reset(new (std::nothrow) uint8_t[len]);
+            if (payload)
             {
                 memcpy(payload.get(), p, len);
-            }
-            else
-            {
-                memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
-                length = MQTT_MAX_PAYLOAD_SIZE;
             }
         }
     }
@@ -200,6 +233,7 @@ struct IncomingQoS2Message
     bool retained;
     String senderClientId;
     String originalClientId;
+    uint8_t qos = 2;
 
     IncomingQoS2Message() : payload_len(0), retained(false) {}
 
@@ -208,15 +242,10 @@ struct IncomingQoS2Message
     {
         if (len > 0 && p != nullptr)
         {
-            payload.reset(new uint8_t[len]);
-            if (len <= MQTT_MAX_PAYLOAD_SIZE)
+            payload.reset(new (std::nothrow) uint8_t[len]);
+            if (payload)
             {
                 memcpy(payload.get(), p, len);
-            }
-            else
-            {
-                memcpy(payload.get(), p, MQTT_MAX_PAYLOAD_SIZE);
-                payload_len = MQTT_MAX_PAYLOAD_SIZE;
             }
         }
     }
@@ -224,6 +253,8 @@ struct IncomingQoS2Message
 
 typedef std::function<void(const String& clientId, const String& clientIp, const String& username, int passwordLen)> ClientCallback;
 typedef std::function<void(const String& clientId, const String& topic, const String& message)> MessageCallback;
+// Datenzeiger gilt während des Aufrufs; Nutzdaten sind kein C-String.
+typedef std::function<void(const String& clientId, const String& topic, const uint8_t* payload, size_t length)> BinaryMessageCallback;
 typedef std::function<void(const String& clientId)> ClientDisconnectCallback;
 typedef std::function<void(const String& clientId, int errorCode, const String& errorMessage)> ErrorCallback;
 typedef std::function<void(const String& clientId, const String& topic)> SubscribeCallback;
@@ -241,17 +272,20 @@ public:
     bool publish(const char *topic, const char *payload, bool retained = false, uint8_t qos = 0);
     bool publish(const char *topic, const char *payload, bool retained, uint8_t qos, const String &excludeClientId);
     bool publish(const char *topic, uint8_t qos, bool retained, const char *payload);
+    bool publish(const char *topic, const uint8_t *payload, size_t payloadLen,
+                 bool retained = false, uint8_t qos = 0, const String &excludeClientId = "");
     void setConfig(const ESPAsyncMQTTBrokerConfig &config);
-    void setDebugLevel(DebugLevel level) { debugLevel = level; }
-    void setLoggingCallback(LoggingCallback callback) { loggingCallback = callback; }
-    void onClientConnect(ClientCallback callback) { clientConnectCallback = callback; }
-    void onMessage(MessageCallback callback) { messageCallback = callback; }
-    void onClientDisconnect(ClientDisconnectCallback callback) { clientDisconnectCallback = callback; }
-    void onError(ErrorCallback callback) { errorCallback = callback; }
-    void onSubscribe(SubscribeCallback callback) { subscribeCallback = callback; }
-    void onUnsubscribe(UnsubscribeCallback callback) { unsubscribeCallback = callback; }
-    // BP3-03: Const-Referenz statt Kopie zurückgeben
-    const std::map<String, String>& getConnectedClientsInfo() const { return connectedClientsInfo; }
+    void setDebugLevel(DebugLevel level) { std::lock_guard<std::recursive_mutex> lock(stateMutex); debugLevel = level; }
+    void setLoggingCallback(LoggingCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); loggingCallback = callback; }
+    void onClientConnect(ClientCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); clientConnectCallback = callback; }
+    void onMessage(MessageCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); messageCallback = callback; }
+    void onBinaryMessage(BinaryMessageCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); binaryMessageCallback = callback; }
+    void onClientDisconnect(ClientDisconnectCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); clientDisconnectCallback = callback; }
+    void onError(ErrorCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); errorCallback = callback; }
+    void onSubscribe(SubscribeCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); subscribeCallback = callback; }
+    void onUnsubscribe(UnsubscribeCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); unsubscribeCallback = callback; }
+    // Kopie statt ungeschützter Referenz auf gleichzeitig veränderte Map.
+    std::map<String, String> getConnectedClientsInfo() const { std::lock_guard<std::recursive_mutex> lock(stateMutex); return connectedClientsInfo; }
 
     // ---- Connected-Clients API (für UI/Status ohne separaten Zähler) ----
     // Gibt die Anzahl aktuell als "connected" markierter Sessions zurück.
@@ -259,11 +293,13 @@ public:
     bool setPort(uint16_t newPort);
 
 private:
+    mutable std::recursive_mutex stateMutex;
     uint16_t port;
     std::unique_ptr<AsyncServer> server;
-    std::map<AsyncClient *, std::unique_ptr<MQTTClient>> clients;
+    std::map<AsyncClient *, std::shared_ptr<MQTTClient>> clients;
     std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
-    std::map<String, std::unique_ptr<MQTTClient>> persistentSessions;
+    std::map<String, std::shared_ptr<MQTTClient>> persistentSessions;
+    std::deque<IncomingQoS2Message> pendingWills;
     // incomingQoS2Messages liegt jetzt im MQTTClient (per-Client statt global)
     ESPAsyncMQTTBrokerConfig brokerConfig;
 
@@ -273,15 +309,24 @@ private:
     bool authNeedPassword = false;        // true wenn Passwort konfiguriert
     DebugLevel debugLevel = DEBUG_INFO;  // ← Wird im Konstruktor überschrieben mit BROKER_DEBUG_LEVEL!
     esp_timer_handle_t timeoutTimer = nullptr;
-    volatile bool checkTimeoutsFlag = false; // ISR-sicheres Flag fuer Timer-Callback (BP1-01)
+    std::atomic<bool> checkTimeoutsFlag{false};
     std::map<String, String> connectedClientsInfo;
-    uint16_t nextPacketId = 1;
-
-    uint16_t getNextPacketId();
+    uint64_t nextSequence = 1;
+    uint32_t nextAssignedId = 1;
+    uint16_t getNextPacketId(MQTTClient *client);
+    size_t storedBytes() const;
+    void disconnectClient(AsyncClient *transport);
+    void pumpMessages(const std::shared_ptr<MQTTClient>& client);
+    bool sendMessage(MQTTClient *client, OutgoingQoSMessage &message, bool duplicate);
+    void notifyMessage(const String& clientId, const String& topic, const uint8_t* payload, size_t length);
+    bool publishMessage(const char *topic, const uint8_t *payload, size_t payloadLen,
+                        bool retained, uint8_t qos, const String &excludeClientId, bool dispatch);
+    void flushMessages();
 
     ClientCallback clientConnectCallback = nullptr;
     ClientDisconnectCallback clientDisconnectCallback = nullptr;
     MessageCallback messageCallback = nullptr;
+    BinaryMessageCallback binaryMessageCallback = nullptr;
     ErrorCallback errorCallback = nullptr;
     SubscribeCallback subscribeCallback = nullptr;
     UnsubscribeCallback unsubscribeCallback = nullptr;
@@ -303,12 +348,11 @@ private:
     bool topicMatches(const String &subscription, const String &topic);
     void sendRetainedMessages(MQTTClient *client, const Subscription &subscription);
     bool authenticateClient(const String &username, const String &password);
-    void onClient(AsyncClient *client);
+    void onClient(AsyncClient *client, bool ownsTransport = false);
     void checkTimeouts();
     void logMessage(DebugLevel level, const char *format, ...);
     bool isValidPublishTopic(const String &topic);
     bool isValidTopicFilter(const String &filter);
-    bool publish(const char *topic, const uint8_t *payload, size_t payloadLen, bool retained, uint8_t qos, const String &excludeClientId);
     // BP3-06: isUserAllowed() als toter Code entfernt
 };
 
