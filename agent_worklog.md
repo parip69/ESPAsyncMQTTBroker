@@ -141,3 +141,12 @@ keine Fingerprint-Anwendungslogik und keine weiteren Änderungen unter
 Version 2.0.222. Die Entwicklung dieser Folgeversion wird hier noch nicht
 begonnen. Umfang und Reihenfolge der Restpunkte sind vor ihrer Umsetzung
 festzulegen.
+
+## TODO-Liste im Projekt – 05.10.2026
+
+Auf Benutzerwunsch `TODO.md` im Broker-Projekt angelegt und oben in der
+README verlinkt. Die Liste enthält den eingefrorenen Stand `v2.0.222`,
+die bekannten MQTT-3.1.1-Restpunkte in getrennten Arbeitspaketen, die
+Geräteregressionen, die optionale physische Zeitmessung und die Fundstellen
+der Testnachweise. Keine neue Implementierung, keine Versionsänderung,
+kein Build und kein Geräte-Upload. Der bestehende Tag bleibt unverändert.

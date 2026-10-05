@@ -4,6 +4,8 @@
 
 Ein asynchroner MQTT-Broker für den ESP32 auf Basis von `AsyncTCP`.
 
+**Hier weiterarbeiten:** [TODO-Liste für die nächsten MQTT-3.1.1-Schritte](TODO.md).
+
 ## Features
 
 - MQTT-Broker läuft direkt auf dem ESP32
