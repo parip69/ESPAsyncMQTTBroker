@@ -22,7 +22,7 @@ Der bisherige Stand bleibt unter Tag **v2.0.222** erhalten.
 - [x] Normalbetrieb mit QoS 0 und `DEBUG_NONE` herstellen; COM-Ports freigeben.
 - [x] Tests, Benchmarks und Prüfunterlagen vom Upload ausschließen.
 - [x] Dauerhafte Upload-Auswahl in `.gitignore`: nur Bibliotheksquellen, Metadaten, Lizenz und knappe Dokumentation; Test-, Hardware- und Beispieldateien ausschließen.
-- [ ] Abgeschlossene Testordner lokal aufräumen; Rückkehrdateien und kurze Zusammenfassung sind gesichert.
+- [x] Abgeschlossene Testordner lokal aufräumen; vom Benutzer als sauber bestätigt. Rückkehrdateien und kurze Zusammenfassung sind gesichert.
 - [ ] Ausgewählte Bibliotheksbeispiele in einer späteren Aufgabe ergänzen.
 - [x] Bibliotheksstand 2.0.223 auf GitHub veröffentlichen; nur die elf freigegebenen Bibliotheksdateien.
 
@@ -48,9 +48,9 @@ Normative Grundlage:
 
 - [x] Native Fehlerfallprüfungen und ESP32-Build abschließen.
 - [x] Protokoll-, Wiederverbindungs-, Last- und automatische Schaltprüfungen abschließen.
-- [ ] Temporäre Testordner entfernen; nur notwendige Rückkehrdateien und kurze Zusammenfassung behalten.
+- [x] Temporäre Testordner entfernen; vom Benutzer als sauber bestätigt. Nur notwendige Rückkehrdateien und kurze Zusammenfassung behalten.
 - [x] Nur die elf freigegebenen Bibliotheksdateien auf GitHub veröffentlichen.
 
 ## Nur bei Bedarf
 
-- [ ] Physische 500-ms-Pulsdauer mit geeigneter Messhardware exakt prüfen.
+- [x] Prüfung der physischen 500-ms-Pulsdauer an den Benutzer übergeben; die genaue Messung erfolgt eigenständig.
