@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.0.223 - Oktober 2026 (lokal geprüft, Veröffentlichung vorbereitet)
+## v2.0.223 - Oktober 2026
 - Konfigurierbares Gesamtpaketlimit von standardmäßig 4096 Byte; vollständige Shelly-Statusmeldungen, keine separate 768-Byte-Payloadgrenze und keine stille Kürzung innerhalb des Limits.
 - Paketlängen, Packet-Identifier und Remaining Length prüfen; UNSUBSCRIBE vor Änderungen vollständig validieren; große SUBACK-Antworten korrekt kodieren.
 - Live-RETAIN, Topic-Matcher einschließlich `$`, höchste passende Subscription-QoS und Retained-Auswahl je angefragtem Filter korrigieren.
