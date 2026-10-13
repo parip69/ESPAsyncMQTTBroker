@@ -61,6 +61,9 @@
 #ifndef MQTT_MAX_QUEUED_MESSAGES
 #define MQTT_MAX_QUEUED_MESSAGES 32
 #endif
+#ifndef MQTT_MAX_SESSION_QUEUED_BYTES
+#define MQTT_MAX_SESSION_QUEUED_BYTES (MQTT_MAX_STORED_BYTES / 4U)
+#endif
 #ifndef MQTT_MAX_INFLIGHT_MESSAGES
 #define MQTT_MAX_INFLIGHT_MESSAGES 16
 #endif
@@ -120,6 +123,14 @@ struct Subscription
 
 struct IncomingQoS2Message;
 
+// Vollstaendige Pakete bleiben bis zur TCP-Annahme geordnet erhalten.
+struct MQTTTransmitPacket
+{
+    std::vector<uint8_t> bytes;
+    size_t offset = 0;
+    uint16_t packetId = 0;
+};
+
 /**
  * Repräsentiert einen verbundenen MQTT-Client
  */
@@ -136,6 +147,12 @@ struct MQTTClient
     bool cleanSession = true;
     std::vector<Subscription> subscriptions;
     std::vector<uint8_t> rxBuffer;
+    std::deque<MQTTTransmitPacket> txPackets;
+    size_t txBytes = 0;
+    uint32_t txProgressAt = 0;
+    bool outputPending = false;
+    uint32_t droppedQoS0 = 0;
+    bool processingTx = false;
     bool processingRx = false; ///< Reentranten Empfang erst nach dem laufenden Paket bearbeiten.
     uint8_t protocolVersion = MQTT_PROTOCOL_LEVEL;
     bool hasWill = false;
@@ -261,6 +278,21 @@ typedef std::function<void(const String& clientId, const String& topic)> Subscri
 typedef std::function<void(const String& clientId, const String& topic)> UnsubscribeCallback;
 typedef std::function<void(DebugLevel level, const String &message)> LoggingCallback;
 
+struct MQTTSessionDiagnostics
+{
+    String clientId;
+    bool offline = false;
+    size_t pending = 0, inflight = 0, queuedBytes = 0, txBytes = 0;
+    uint32_t droppedQoS0 = 0;
+};
+
+struct MQTTBrokerDiagnostics
+{
+    size_t storedBytes = 0;
+    uint32_t droppedQoS0 = 0, rejectedReliable = 0;
+    std::vector<MQTTSessionDiagnostics> sessions;
+};
+
 class ESPAsyncMQTTBroker
 {
 public:
@@ -291,9 +323,12 @@ public:
     // Gibt die Anzahl aktuell als "connected" markierter Sessions zurück.
     size_t getConnectedClientCount() const;
     bool setPort(uint16_t newPort);
+    bool isRunning() const { std::lock_guard<std::recursive_mutex> lock(stateMutex); return server && server->status() != 0; }
+    MQTTBrokerDiagnostics getDiagnostics() const;
 
 private:
     mutable std::recursive_mutex stateMutex;
+    uint32_t droppedQoS0Count = 0, rejectedReliableCount = 0;
     uint16_t port;
     std::unique_ptr<AsyncServer> server;
     std::map<AsyncClient *, std::shared_ptr<MQTTClient>> clients;
@@ -318,6 +353,8 @@ private:
     void disconnectClient(AsyncClient *transport);
     void pumpMessages(const std::shared_ptr<MQTTClient>& client);
     bool sendMessage(MQTTClient *client, OutgoingQoSMessage &message, bool duplicate);
+    bool sendPacket(MQTTClient *client, const uint8_t *data, size_t length, uint16_t packetId = 0);
+    void drainPackets(MQTTClient *client);
     void notifyMessage(const String& clientId, const String& topic, const uint8_t* payload, size_t length);
     bool publishMessage(const char *topic, const uint8_t *payload, size_t payloadLen,
                         bool retained, uint8_t qos, const String &excludeClientId, bool dispatch);
