@@ -462,6 +462,7 @@ void ESPAsyncMQTTBroker::begin()
 
     if (server) return;
     server.reset(new AsyncServer(port));
+    server->setNoDelay(tcpNoDelay);
 
     server->onClient([](void *arg, AsyncClient *client)
 
@@ -1609,6 +1610,20 @@ bool ESPAsyncMQTTBroker::authenticateClient(const String &username, const String
         logMessage(DEBUG_INFO, "[AUTH] Mode=USER_PASS: Username+Pass OK -> Accept");
     }
     return true;
+}
+
+bool ESPAsyncMQTTBroker::setTcpNoDelay(bool enabled)
+{
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    if (server) return false;
+    tcpNoDelay = enabled;
+    return true;
+}
+
+bool ESPAsyncMQTTBroker::getTcpNoDelay() const
+{
+    std::lock_guard<std::recursive_mutex> lock(stateMutex);
+    return tcpNoDelay;
 }
 
 bool ESPAsyncMQTTBroker::setPort(uint16_t newPort)

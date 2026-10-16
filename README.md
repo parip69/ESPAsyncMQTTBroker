@@ -221,3 +221,22 @@ MIT License
 Das Standard-Paketlimit ist 4096 Byte inklusive Topic/Header, per
 `-D MQTT_MAX_PACKET_SIZE=8192` bei Bedarf konfigurierbar. Eine separate
 768-Byte-Payloadgrenze besteht nicht mehr. Speicher wird nach Bedarf belegt.
+
+## TCP_NODELAY vor dem Brokerstart konfigurieren
+
+`setTcpNoDelay(true)` schaltet TCP_NODELAY fuer neu angenommene
+Brokerverbindungen ein. Die Option muss vor `begin()` gesetzt werden.
+Der Standard bleibt `false`; bestehende Anwendungen behalten ihr Verhalten.
+Der Rueckgabewert ist `false`, wenn bereits ein Server existiert; dann wird
+nichts umgestellt. Nach `stop()` kann die Option fuer den naechsten Start
+neu gesetzt werden. `getTcpNoDelay()` liefert die konfigurierte Option.
+Die Einstellung bleibt ueber `stop()`/`begin()` erhalten. Es wird kein
+persistenter Geraeteeintrag und kein MQTT-Protokollparameter angelegt.
+
+```cpp
+broker.setTcpNoDelay(true);
+broker.begin();
+```
+
+Diese Transportoption aendert weder QoS, Retain, Sessions noch Queuelimits.
+Eine bestimmte Latenzverbesserung ist nur durch Messung belegbar.

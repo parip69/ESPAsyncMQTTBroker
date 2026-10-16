@@ -323,6 +323,9 @@ public:
     // Gibt die Anzahl aktuell als "connected" markierter Sessions zurück.
     size_t getConnectedClientCount() const;
     bool setPort(uint16_t newPort);
+    // Vor begin() setzen; bei laufendem Server wird eine Aenderung abgelehnt.
+    bool setTcpNoDelay(bool enabled);
+    bool getTcpNoDelay() const;
     bool isRunning() const { std::lock_guard<std::recursive_mutex> lock(stateMutex); return server && server->status() != 0; }
     MQTTBrokerDiagnostics getDiagnostics() const;
 
@@ -330,6 +333,7 @@ private:
     mutable std::recursive_mutex stateMutex;
     uint32_t droppedQoS0Count = 0, rejectedReliableCount = 0;
     uint16_t port;
+    bool tcpNoDelay = false;
     std::unique_ptr<AsyncServer> server;
     std::map<AsyncClient *, std::shared_ptr<MQTTClient>> clients;
     std::map<String, std::unique_ptr<RetainedMessage>> retainedMessages;
