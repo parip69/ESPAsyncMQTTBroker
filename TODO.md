@@ -54,3 +54,13 @@ Normative Grundlage:
 ## Nur bei Bedarf
 
 - [x] Prüfung der physischen 500-ms-Pulsdauer an den Benutzer übergeben; die genaue Messung erfolgt eigenständig.
+
+## Schaltpfadkorrektur vom 22.10.2026
+
+- [x] Fehlenden Retain-Nachweis im bisherigen Anwendungscallback nachvollziehen: Schaltauftrag und gespeicherter Zustand waren dort nicht unterscheidbar.
+- [x] Optionale Schnittstelle `onMessageWithRetain` ergänzen, ohne bestehende Text-/Binaercallbacks zu ändern.
+- [x] Retain sowohl für QoS 0/1 als auch nach QoS-2-Abschluss weiterreichen; Text nur einmal konvertieren.
+- [x] Originalfunktion mit Address-/UndefinedBehaviorSanitizer und beiden Retain-Werten prüfen; Legacy-/Binaercallbacks erhalten: PASS.
+- [x] Korrektur direkt im Bibliotheksrepository veröffentlichen. Tests und ausführliches Arbeitsprotokoll lokal behalten, entsprechend der bisherigen Upload-Auswahl.
+- [ ] Den veröffentlichten festen Commit sauber in allen drei Firmwarevarianten MAX/MIN/Ro beziehen und deren Builds prüfen.
+- [ ] Reale Wiederanmeldung und Finger-/Web-/MQTT-Impulse mit der neuen Firmware abnehmen. Hosttests ersetzen diese Hardwareprüfung nicht.

@@ -240,3 +240,12 @@ broker.begin();
 
 Diese Transportoption aendert weder QoS, Retain, Sessions noch Queuelimits.
 Eine bestimmte Latenzverbesserung ist nur durch Messung belegbar.
+
+### Retain-Merkmal im Anwendungscallback
+
+`onMessageWithRetain(callback)` ergänzt den bisherigen Textcallback um einen
+vierten Parameter `bool retained`. Er enthält das RETAIN-Bit des eingehenden
+PUBLISH, auch wenn die Anwendung erst nach dem QoS-2-Abschluss benachrichtigt
+wird. Damit kann eine Schaltanwendung gespeicherte Schaltaufträge ablehnen.
+`onMessage` und `onBinaryMessage` bleiben unverändert verfügbar. Werden mehrere
+Callbacks registriert, wird jeder davon einmal benachrichtigt.
