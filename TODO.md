@@ -62,5 +62,6 @@ Normative Grundlage:
 - [x] Retain sowohl für QoS 0/1 als auch nach QoS-2-Abschluss weiterreichen; Text nur einmal konvertieren.
 - [x] Originalfunktion mit Address-/UndefinedBehaviorSanitizer und beiden Retain-Werten prüfen; Legacy-/Binaercallbacks erhalten: PASS.
 - [x] Korrektur direkt im Bibliotheksrepository veröffentlichen. Tests und ausführliches Arbeitsprotokoll lokal behalten, entsprechend der bisherigen Upload-Auswahl.
+- [x] Separaten ESP32-/Arduino-Build mit altem Text-/Binaercallback und neuer Retain-Schnittstelle abschliessen: PASS, null Compilerwarnungen.
 - [ ] Den veröffentlichten festen Commit sauber in allen drei Firmwarevarianten MAX/MIN/Ro beziehen und deren Builds prüfen.
 - [ ] Reale Wiederanmeldung und Finger-/Web-/MQTT-Impulse mit der neuen Firmware abnehmen. Hosttests ersetzen diese Hardwareprüfung nicht.
