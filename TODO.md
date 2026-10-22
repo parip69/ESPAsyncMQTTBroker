@@ -63,5 +63,5 @@ Normative Grundlage:
 - [x] Originalfunktion mit Address-/UndefinedBehaviorSanitizer und beiden Retain-Werten prüfen; Legacy-/Binaercallbacks erhalten: PASS.
 - [x] Korrektur direkt im Bibliotheksrepository veröffentlichen. Tests und ausführliches Arbeitsprotokoll lokal behalten, entsprechend der bisherigen Upload-Auswahl.
 - [x] Separaten ESP32-/Arduino-Build mit altem Text-/Binaercallback und neuer Retain-Schnittstelle abschliessen: PASS, null Compilerwarnungen.
-- [ ] Den veröffentlichten festen Commit sauber in allen drei Firmwarevarianten MAX/MIN/Ro beziehen und deren Builds prüfen.
+- [x] Veröffentlichten festen Commit d5a1770ea71d9fb399f3bc320720103525079972 in MAX/MIN/Ro sauber bezogen; alle sechs eingebundenen Bibliotheksdateien byteidentisch. Vollständige Firmware-/LittleFS-Builds 2.4.46 PASS, null Compilerwarnungen; MIN ohne MQTT-Symbole. Hostregressionen 22/22 PASS. Integration mit unveränderter privater OTA-Bibliothek aus Nutzerarchiv geprüft.
 - [ ] Reale Wiederanmeldung und Finger-/Web-/MQTT-Impulse mit der neuen Firmware abnehmen. Hosttests ersetzen diese Hardwareprüfung nicht.
