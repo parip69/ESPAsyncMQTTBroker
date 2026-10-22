@@ -164,13 +164,15 @@ size_t ESPAsyncMQTTBroker::storedBytes() const
 }
 
 void ESPAsyncMQTTBroker::notifyMessage(const String& id, const String& topic,
-                                     const uint8_t *payload, size_t length)
+                                     const uint8_t *payload, size_t length, bool retained)
 {
     const auto textCallback = messageCallback;
+    const auto retainedCallback = retainedMessageCallback;
     const auto bytesCallback = binaryMessageCallback;
-    const String text = textCallback ? mqttString(payload, length) : String();
+    const String text = (textCallback || retainedCallback) ? mqttString(payload, length) : String();
     if (bytesCallback) bytesCallback(id, topic, payload, length);
     if (textCallback) textCallback(id, topic, text);
+    if (retainedCallback) retainedCallback(id, topic, text, retained);
 }
 
 void ESPAsyncMQTTBroker::disconnectClient(AsyncClient *transport)
@@ -1208,7 +1210,7 @@ void ESPAsyncMQTTBroker::handlePublish(MQTTClient *client, uint8_t *data, size_t
         if (!sendPacket(client, puback, 4) && isClientActive(transport, client)) closeMQTTClient(client);
     }
     flushMessages();
-    notifyMessage(source, topic, data + offset, payloadLength);
+    notifyMessage(source, topic, data + offset, payloadLength, retained);
 }
 
 void ESPAsyncMQTTBroker::handleSubscribe(MQTTClient *client, uint8_t *data, size_t length)
@@ -1444,7 +1446,7 @@ void ESPAsyncMQTTBroker::handlePubRel(MQTTClient *client, uint8_t *data, size_t 
     uint8_t pubcomp[] = {0x70, 2, static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id)};
     if (!sendPacket(client, pubcomp, 4) && isClientActive(transport, client)) closeMQTTClient(client);
     flushMessages();
-    if (deliver) notifyMessage(message.senderClientId, message.topic, message.payload.get(), message.payload_len);
+    if (deliver) notifyMessage(message.senderClientId, message.topic, message.payload.get(), message.payload_len, message.retained);
 }
 
 void ESPAsyncMQTTBroker::handlePubComp(MQTTClient *client, uint8_t *data, size_t len)

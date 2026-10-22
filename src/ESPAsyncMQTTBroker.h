@@ -270,6 +270,8 @@ struct IncomingQoS2Message
 
 typedef std::function<void(const String& clientId, const String& clientIp, const String& username, int passwordLen)> ClientCallback;
 typedef std::function<void(const String& clientId, const String& topic, const String& message)> MessageCallback;
+// Retain wird fuer die sichere Trennung von Schaltauftraegen und Zustandsspeicherung benoetigt.
+typedef std::function<void(const String& clientId, const String& topic, const String& message, bool retained)> RetainedMessageCallback;
 // Datenzeiger gilt während des Aufrufs; Nutzdaten sind kein C-String.
 typedef std::function<void(const String& clientId, const String& topic, const uint8_t* payload, size_t length)> BinaryMessageCallback;
 typedef std::function<void(const String& clientId)> ClientDisconnectCallback;
@@ -311,6 +313,7 @@ public:
     void setLoggingCallback(LoggingCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); loggingCallback = callback; }
     void onClientConnect(ClientCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); clientConnectCallback = callback; }
     void onMessage(MessageCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); messageCallback = callback; }
+    void onMessageWithRetain(RetainedMessageCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); retainedMessageCallback = callback; }
     void onBinaryMessage(BinaryMessageCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); binaryMessageCallback = callback; }
     void onClientDisconnect(ClientDisconnectCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); clientDisconnectCallback = callback; }
     void onError(ErrorCallback callback) { std::lock_guard<std::recursive_mutex> lock(stateMutex); errorCallback = callback; }
@@ -359,7 +362,7 @@ private:
     bool sendMessage(MQTTClient *client, OutgoingQoSMessage &message, bool duplicate);
     bool sendPacket(MQTTClient *client, const uint8_t *data, size_t length, uint16_t packetId = 0);
     void drainPackets(MQTTClient *client);
-    void notifyMessage(const String& clientId, const String& topic, const uint8_t* payload, size_t length);
+    void notifyMessage(const String& clientId, const String& topic, const uint8_t* payload, size_t length, bool retained);
     bool publishMessage(const char *topic, const uint8_t *payload, size_t payloadLen,
                         bool retained, uint8_t qos, const String &excludeClientId, bool dispatch);
     void flushMessages();
@@ -367,6 +370,7 @@ private:
     ClientCallback clientConnectCallback = nullptr;
     ClientDisconnectCallback clientDisconnectCallback = nullptr;
     MessageCallback messageCallback = nullptr;
+    RetainedMessageCallback retainedMessageCallback = nullptr;
     BinaryMessageCallback binaryMessageCallback = nullptr;
     ErrorCallback errorCallback = nullptr;
     SubscribeCallback subscribeCallback = nullptr;
