@@ -1,6 +1,6 @@
 # TODO – ESPAsyncMQTTBroker
 
-Stand: 05.10.2026. Aktive Arbeitskopie: **2.0.224**.
+Stand: 29.10.2026. Aktive Arbeitskopie: **2.0.225**.
 Der bisherige Stand bleibt unter Tag **v2.0.222** erhalten.
 
 ## Paket 1 abgeschlossen
@@ -65,3 +65,15 @@ Normative Grundlage:
 - [x] Separaten ESP32-/Arduino-Build mit altem Text-/Binaercallback und neuer Retain-Schnittstelle abschliessen: PASS, null Compilerwarnungen.
 - [x] Veröffentlichten festen Commit d5a1770ea71d9fb399f3bc320720103525079972 in MAX/MIN/Ro sauber bezogen; alle sechs eingebundenen Bibliotheksdateien byteidentisch. Vollständige Firmware-/LittleFS-Builds 2.4.46 PASS, null Compilerwarnungen; MIN ohne MQTT-Symbole. Hostregressionen 22/22 PASS. Integration mit unveränderter privater OTA-Bibliothek aus Nutzerarchiv geprüft.
 - [ ] Reale Wiederanmeldung und Finger-/Web-/MQTT-Impulse mit der neuen Firmware abnehmen. Hosttests ersetzen diese Hardwareprüfung nicht.
+
+## Kleine Stabilitaetskorrektur vom 29.10.2026
+
+Ausgangsstand funktioniert nach Nutzerbestaetigung sehr gut; MQTT-Anmeldung und Schalten sind bereits schnell. Nur belegten Nutzen bei erhaltener Zuverlaessigkeit uebernehmen, ansonsten zuruecknehmen. Keine neuen CPP-/H-Dateien.
+
+- [x] Originale Timerfehler reproduzieren; Erzeugungs-/Startfehler mit Ressourcenfreigabe und Wiederstart absichern. Acht Funktions-/Timer-/Konkurrenzfaelle PASS; normaler Start und Stop bei wartender Wartung erhalten.
+- [x] Zwei Loopkandidaten untersuchen und wieder entfernen. Vollstaendige Entfernung der aeusseren Arbeitssperre scheitert am Stop-Konkurrenzfall. Sicherer Fruehreturn senkt isolierte Methodenkosten von 8,117135 auf 0,067175 us, zeigt in wiederholten vollstaendigen Images aber etwa 0,8 ms hoehere MQTT-Mediane und hoehere Main-Looprate. Kein Gesamtvorteil belegt, daher Original-Loop vollstaendig erhalten. Kein pauschaler CPU-/RAM-Gewinn behauptet.
+- [x] Verworfenem Fruehreturn 22 MQTT-Faelle, Schaltstatus und 600-s-Lasttest erfolgreich gegenpruefen; diese Funktionsnachweise heben den Laufzeitnachteil nicht auf und ersetzen keine Abnahme des endgueltigen Timerstands.
+- [x] Endgueltigen reinen Timerstand ohne Messdiagnose auf .99 pruefen: 22 MQTT-Faelle PASS, Transportmediane wieder im bisherigen Bereich (QoS0 9,901-10,090 ms, QoS1 12,115-12,302 ms), Schaltstatus beider ESPs/Shelly PASS. Normaler geschuetzter OTA-Ablauf mit einem abschliessenden Neustart; Einstellungen erhalten.
+- [x] Endgueltiger Timerstand: 600,34 s Last, 2905 Publishes und 8715 gepruefte Zustellungen, 27 Wiederverbindungen, 147 Geraeteabfragen, keine Test-/HTTP-Fehler. Ressourcenstichproben ohne Bootwechsel, neue Fehlerzaehler oder haengende Queues. Kein 24-h-Nachweis daraus ableiten.
+- [ ] Erfolgreichen Stand veroeffentlichen, festen Commit regulaer in MAX/MIN/Ro beziehen und Varianten pruefen.
+- [ ] Langzeitlauf 24-48 Stunden separat nachweisen; kurzer Lasttest ist kein Ersatz. Menschliche Fingerauflage/elektrische Pulsbreite nicht als automatisch geprueft melden.

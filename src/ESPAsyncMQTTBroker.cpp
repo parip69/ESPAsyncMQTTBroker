@@ -1,4 +1,4 @@
-// @ 2.0.224
+// @ 2.0.225
 
 #include "ESPAsyncMQTTBroker.h"
 
@@ -478,8 +478,6 @@ void ESPAsyncMQTTBroker::begin()
 
         broker->onClient(client, true); }, this);
 
-    server->begin();
-
     esp_timer_create_args_t timer_args{};
 
     timer_args.callback = [](void *arg)
@@ -496,9 +494,17 @@ void ESPAsyncMQTTBroker::begin()
 
     timer_args.name = "mqtt_timeout_timer";
 
-    esp_timer_create(&timer_args, &timeoutTimer);
-
-    esp_timer_start_periodic(timeoutTimer, 1000000); // 1 second
+    if (esp_timer_create(&timer_args, &timeoutTimer) != ESP_OK) {
+        server.reset();
+        return;
+    }
+    if (esp_timer_start_periodic(timeoutTimer, 1000000) != ESP_OK) {
+        esp_timer_delete(timeoutTimer);
+        timeoutTimer = nullptr;
+        server.reset();
+        return;
+    }
+    server->begin();
 }
 
 void ESPAsyncMQTTBroker::loop()

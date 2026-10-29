@@ -1,5 +1,5 @@
 // ❤️ 📂 🎉 ❤️  🎉 Grosse Optimierung  🎉  ❤️ 📂 🎉❤️️️
-// @ 2.0.224
+// @ 2.0.225
 #ifndef ESP_ASYNC_MQTT_BROKER_H
 #define ESP_ASYNC_MQTT_BROKER_H
 

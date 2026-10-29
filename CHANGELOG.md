@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.225 - 29. Oktober 2026
+- Broker erst nach erfolgreichem Start des Wartungstimers aktivieren; Erzeugungs-/Startfehler aufraeumen und erneuten Start erlauben.
+- Bestehenden Loop, Sperren, MQTT-Verarbeitung und Wartungsintervalle erhalten.
+- Acht Funktions-/Timer-/Konkurrenzfaelle, 22 MQTT-Protokollfaelle, normale Schaltstatusproben und 600-s-Lasttest mit 8715 geprueften Zustellungen bestanden; MQTT-Schleife unveraendert.
+- Gemeinsame Versionsnummer in CPP-/H-Kopf und Paketmetadaten fortgeschrieben; keine neue Quelldatei oder Schnittstelle.
+
 ## v2.0.224 - Oktober 2026
 - Binärpayloads einschließlich Nullbytes durchgängig erhalten; längenbewusste Publish-API und `onBinaryMessage` ergänzt, Text-Callback weiterhin verfügbar.
 - Vorgeschriebene UTF-8-Felder validiert; Binärpasswörter unverändert verglichen.
